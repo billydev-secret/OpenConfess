@@ -276,9 +276,9 @@ class CustomIdSigner:
 # -----------------------------
 # Embeds + Logging
 # -----------------------------
-def build_confession_embed(title: Optional[str], content: str, tags: Optional[str]) -> discord.Embed:
+def build_confession_embed(content: str) -> discord.Embed:
     content = defang_everyone_here(content)
-    emb = discord.Embed(description=content, timestamp=discord.utils.utcnow())
+    emb = discord.Embed(title="Anonymous Confession ðŸ¤«", description=content, timestamp=discord.utils.utcnow())
 
     return emb
 
@@ -294,7 +294,6 @@ async def log_confession(
     dest_message_id: int,
     title: Optional[str],
     content: str,
-    tags: Optional[str],
 ) -> Optional[discord.Message]:
     emb = discord.Embed(
         title="Logged Confession",
@@ -307,9 +306,6 @@ async def log_confession(
     # Put content in description if short; otherwise a field.
     safe_content = content if len(content) <= 2000 else (content[:1990] + "…")
     emb.add_field(name="Content", value=safe_content[:1024], inline=False)
-    if tags:
-        emb.add_field(name="Tags", value=tags[:1024], inline=False)
-
     emb.add_field(name="Meta", value=f"guild_id={guild_id}\nchannel_id={dest_channel_id}\nmessage_id={dest_message_id}", inline=False)
 
     try:
@@ -394,7 +390,6 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
 
         title = str(self.confession_title.value).strip() if self.confession_title.value else None
         content = str(self.confession.value).strip()
-        tags = str(self.tags.value).strip() if self.tags.value else None
 
         if len(content) == 0:
             await interaction.response.send_message("Confession can’t be empty.", ephemeral=True)
@@ -422,7 +417,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             await interaction.response.send_message("Bot config is invalid (missing destination or log channel).", ephemeral=True)
             return
 
-        emb = build_confession_embed(title, content, tags)
+        emb = build_confession_embed(content)
         message_title = defang_everyone_here(title) if title else None
 
         # Build signed reply button custom_id based on final message ids (we need message_id -> send first, then edit with view)
@@ -454,7 +449,6 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             dest_message_id=sent.id,
             title=title,
             content=content,
-            tags=tags,
         )
 
         await self.bot.refresh_confess_launcher(interaction.guild.id, trigger_channel_id=dest_channel.id)
