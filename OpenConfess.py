@@ -278,10 +278,7 @@ class CustomIdSigner:
 # -----------------------------
 def build_confession_embed(title: Optional[str], content: str, tags: Optional[str]) -> discord.Embed:
     content = defang_everyone_here(content)
-    emb = discord.Embed(title="# Anonymous Confession 🤫", description=content, timestamp=discord.utils.utcnow())
-
-    if tags:
-        emb.add_field(name="Tags", value=defang_everyone_here(tags), inline=False)
+    emb = discord.Embed(description=content, timestamp=discord.utils.utcnow())
 
     return emb
 
@@ -367,13 +364,6 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         required=True,
         max_length=4000,  # we'll enforce guild max_chars later
         placeholder="Say it plainly. No names if you can help it."
-    )
-    tags = discord.ui.TextInput(
-        label="Tags (optional)",
-        style=discord.TextStyle.short,
-        required=False,
-        max_length=128,
-        placeholder="e.g. advice, rant, wholesome, cw: ..."
     )
 
     def __init__(
