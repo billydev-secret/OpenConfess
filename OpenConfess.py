@@ -377,26 +377,26 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         # Re-check config (it might change mid-flight)
         cfg = self.bot.store.get_config(interaction.guild.id)
         if not cfg:
-            await interaction.response.send_message("Bot is not configured. Ask an admin to set destination/log channels.", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "Bot is not configured. Ask an admin to set destination/log channels.")
             return
 
         if cfg.panic:
-            await interaction.response.send_message("Confessions are temporarily disabled.", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "Confessions are temporarily disabled.")
             return
 
         if interaction.user.id in cfg.blocked_set():
-            await interaction.response.send_message("You can’t submit confessions on this server.", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "You can't submit confessions on this server.")
             return
 
         title = str(self.confession_title.value).strip() if self.confession_title.value else None
         content = str(self.confession.value).strip()
 
         if len(content) == 0:
-            await interaction.response.send_message("Confession can’t be empty.", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "Confession can't be empty.")
             return
 
         if len(content) > cfg.max_chars:
-            await interaction.response.send_message(f"That’s too long (max **{cfg.max_chars}** characters).", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, f"That's too long (max **{cfg.max_chars}** characters).")
             return
 
         ok, msg = self.bot.store.check_and_bump_limits(
@@ -407,14 +407,19 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             per_day_limit=cfg.per_day_limit
         )
         if not ok:
-            await interaction.response.send_message(msg, ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, msg)
             return
 
         dest_channel = interaction.guild.get_channel(cfg.dest_channel_id)
         log_channel = interaction.guild.get_channel(cfg.log_channel_id)
 
         if not isinstance(dest_channel, discord.TextChannel) or not isinstance(log_channel, discord.TextChannel):
-            await interaction.response.send_message("Bot config is invalid (missing destination or log channel).", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "Bot config is invalid (missing destination or log channel).")
+            return
+
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.HTTPException:
             return
 
         emb = build_confession_embed(content)
@@ -429,7 +434,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
                 allowed_mentions=discord.AllowedMentions.none()
             )
         except discord.HTTPException:
-            await interaction.response.send_message("Failed to post confession (missing perms?).", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "Failed to post confession (missing perms?).")
             return
 
         view = self.bot.build_reply_view(interaction.guild.id, dest_channel.id, sent.id)
@@ -452,8 +457,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         )
 
         await self.bot.refresh_confess_launcher(interaction.guild.id, trigger_channel_id=dest_channel.id)
-
-        await interaction.response.defer()
+        await self.bot._safe_ephemeral(interaction, "Confession posted.")
 
 
 class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
@@ -485,31 +489,28 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
 
         cfg = self.bot.store.get_config(interaction.guild.id)
         if not cfg:
-            await interaction.response.send_message("Bot is not configured.", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "Bot is not configured.")
             return
 
         if cfg.panic:
-            await interaction.response.send_message("Confessions are temporarily disabled.", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "Confessions are temporarily disabled.")
             return
 
         if not cfg.replies_enabled:
-            await interaction.response.send_message("Anonymous replies are disabled on this server.", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "Anonymous replies are disabled on this server.")
             return
 
         if interaction.user.id in cfg.blocked_set():
-            await interaction.response.send_message("You can’t submit anonymous replies on this server.", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "You can't submit anonymous replies on this server.")
             return
 
         content = str(self.reply.value).strip()
         reply_max_chars = min(cfg.max_chars, 2000)
         if len(content) == 0:
-            await interaction.response.send_message("Reply can’t be empty.", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "Reply can't be empty.")
             return
         if len(content) > reply_max_chars:
-            await interaction.response.send_message(
-                f"That’s too long (max **{reply_max_chars}** characters for replies).",
-                ephemeral=True
-            )
+            await self.bot._safe_ephemeral(interaction, f"That's too long (max **{reply_max_chars}** characters for replies).")
             return
 
         # Replies cooldown: reuse cooldown_seconds but clamp lower bound to 30s for better UX
@@ -523,24 +524,29 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             per_day_limit=0  # default: don’t count replies against per-day cap
         )
         if not ok:
-            await interaction.response.send_message(msg, ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, msg)
             return
 
         dest_channel = interaction.guild.get_channel(self.parent_channel_id)
         log_channel = interaction.guild.get_channel(cfg.log_channel_id)
 
         if not isinstance(dest_channel, discord.TextChannel) or not isinstance(log_channel, discord.TextChannel):
-            await interaction.response.send_message("Bot config is invalid.", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "Bot config is invalid.")
+            return
+
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        except discord.HTTPException:
             return
 
         # Validate parent message still exists and is one of the bot's replyable posts.
         try:
             parent_msg = await dest_channel.fetch_message(self.parent_message_id)
         except discord.NotFound:
-            await interaction.response.send_message("That message no longer exists.", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "That message no longer exists.")
             return
         except discord.HTTPException:
-            await interaction.response.send_message("Couldn’t load that message.", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "Couldn't load that message.")
             return
 
         reply_content = build_reply_content(content)
@@ -552,7 +558,7 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
                 allowed_mentions=discord.AllowedMentions.none()
             )
         except discord.HTTPException:
-            await interaction.response.send_message("Failed to post reply (missing perms?).", ephemeral=True)
+            await self.bot._safe_ephemeral(interaction, "Failed to post reply (missing perms?).")
             return
 
         try:
@@ -572,7 +578,7 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
         )
 
         await self.bot.refresh_confess_launcher(interaction.guild.id, trigger_channel_id=dest_channel.id)
-        await interaction.response.defer()
+        await self.bot._safe_ephemeral(interaction, "Reply posted.")
 
 
 # -----------------------------
