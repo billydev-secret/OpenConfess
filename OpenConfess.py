@@ -369,13 +369,6 @@ async def log_reply(
 # Modals
 # -----------------------------
 class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
-    confession_title = discord.ui.TextInput(
-        label="Title (optional)",
-        style=discord.TextStyle.short,
-        required=False,
-        max_length=100,
-        placeholder="Short subject line for the confession"
-    )
     confession = discord.ui.TextInput(
         label="Confession",
         style=discord.TextStyle.long,
@@ -410,16 +403,14 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             await self.bot._safe_ephemeral(interaction, "You can't submit confessions on this server.")
             return
 
-        title = str(self.confession_title.value).strip() if self.confession_title.value else None
         content = str(self.confession.value).strip()
 
         if len(content) == 0:
             await self.bot._safe_ephemeral(interaction, "Confession can't be empty.")
             return
 
-        heading_text = f"# {defang_everyone_here(title)}" if title else "# Anonymous Confession"
-        # Discord content max is 2000 chars including heading and separators.
-        confession_max_chars = min(cfg.max_chars, max(1, 2000 - len(heading_text) - 2))
+        # Discord content max for a plain message body is 2000 chars.
+        confession_max_chars = min(cfg.max_chars, 2000)
         if len(content) > confession_max_chars:
             await self.bot._safe_ephemeral(
                 interaction,
@@ -450,7 +441,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         except discord.HTTPException:
             return
 
-        confession_text = f"{heading_text}\n\n{defang_everyone_here(content)}"
+        confession_text = defang_everyone_here(content)
         try:
             sent = await dest_channel.send(
                 content=confession_text,
@@ -468,7 +459,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             guild_id=interaction.guild.id,
             dest_channel_id=dest_channel.id,
             dest_message_id=sent.id,
-            title=title,
+            title=None,
             content=content,
         )
         self.bot.store.upsert_thread_post(
