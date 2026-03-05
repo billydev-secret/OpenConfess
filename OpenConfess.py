@@ -41,18 +41,6 @@ def defang_everyone_here(text: str) -> str:
 def jump_link(guild_id: int, channel_id: int, message_id: int) -> str:
     return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
 
-def parse_yes_no(value: Optional[str]) -> Optional[bool]:
-    if value is None:
-        return None
-    text = value.strip().lower()
-    if text == "":
-        return None
-    if text in {"yes", "y", "true", "on", "1"}:
-        return True
-    if text in {"no", "n", "false", "off", "0"}:
-        return False
-    return None
-
 load_dotenv()
 
 # -----------------------------
@@ -391,6 +379,19 @@ async def log_reply(
 # -----------------------------
 # Modals
 # -----------------------------
+class PingPreferenceSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Ping setting",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label="Ping me on replies", value="yes", default=True),
+                discord.SelectOption(label="Do not ping me", value="no"),
+            ],
+        )
+
+
 class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
     confession = discord.ui.TextInput(
         label="Confession",
@@ -399,14 +400,6 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         max_length=4000,  # we'll enforce guild max_chars later
         placeholder="Say it plainly. No names if you can help it."
     )
-    ping_on_reply = discord.ui.TextInput(
-        label="Ping you on replies? (yes/no)",
-        style=discord.TextStyle.short,
-        required=False,
-        max_length=5,
-        placeholder="yes / no (blank = server default)"
-    )
-
     def __init__(
         self,
         bot: "ConfessionsBot",
@@ -415,6 +408,8 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         super().__init__()
         self.bot = bot
         self.cfg = cfg
+        self.ping_select = PingPreferenceSelect()
+        self.add_item(self.ping_select)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         assert interaction.guild and interaction.user
@@ -434,13 +429,8 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             return
 
         content = str(self.confession.value).strip()
-        ping_pref_raw = str(self.ping_on_reply.value).strip() if self.ping_on_reply.value else ""
-        ping_pref = parse_yes_no(ping_pref_raw)
-        if ping_pref is None and ping_pref_raw:
-            await self.bot._safe_ephemeral(interaction, "Use `yes` or `no` for ping preference (or leave blank).")
-            return
-        if ping_pref is None:
-            ping_pref = bool(cfg.notify_op_on_reply)
+        selected = self.ping_select.values[0] if self.ping_select.values else "yes"
+        ping_pref = (selected == "yes")
 
         if len(content) == 0:
             await self.bot._safe_ephemeral(interaction, "Confession can't be empty.")
