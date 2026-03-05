@@ -409,8 +409,9 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             await self.bot._safe_ephemeral(interaction, "Confession can't be empty.")
             return
 
-        # Discord content max for a plain message body is 2000 chars.
-        confession_max_chars = min(cfg.max_chars, 2000)
+        heading_text = "# "
+        # Discord content max is 2000 chars including heading and separators.
+        confession_max_chars = min(cfg.max_chars, max(1, 2000 - len(heading_text) - 2))
         if len(content) > confession_max_chars:
             await self.bot._safe_ephemeral(
                 interaction,
@@ -441,7 +442,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         except discord.HTTPException:
             return
 
-        confession_text = defang_everyone_here(content)
+        confession_text = f"{heading_text}\n\n{defang_everyone_here(content)}"
         try:
             sent = await dest_channel.send(
                 content=confession_text,
