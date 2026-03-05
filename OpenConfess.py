@@ -304,12 +304,6 @@ class ConfigStore:
 # -----------------------------
 # Embeds + Logging
 # -----------------------------
-def build_confession_embed(content: str) -> discord.Embed:
-    content = defang_everyone_here(content)
-    emb = discord.Embed(title="Anonymous Confession ðŸ¤«", description=content, timestamp=discord.utils.utcnow())
-
-    return emb
-
 def build_reply_content(content: str) -> str:
     return defang_everyone_here(content)
 
@@ -423,8 +417,14 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             await self.bot._safe_ephemeral(interaction, "Confession can't be empty.")
             return
 
-        if len(content) > cfg.max_chars:
-            await self.bot._safe_ephemeral(interaction, f"That's too long (max **{cfg.max_chars}** characters).")
+        heading_text = f"# {defang_everyone_here(title)}" if title else "# Anonymous Confession"
+        # Discord content max is 2000 chars including heading and separators.
+        confession_max_chars = min(cfg.max_chars, max(1, 2000 - len(heading_text) - 2))
+        if len(content) > confession_max_chars:
+            await self.bot._safe_ephemeral(
+                interaction,
+                f"That's too long (max **{confession_max_chars}** characters for this confession format).",
+            )
             return
 
         ok, msg = self.bot.store.check_and_bump_limits(
@@ -450,13 +450,10 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         except discord.HTTPException:
             return
 
-        emb = build_confession_embed(content)
-        message_title = defang_everyone_here(title) if title else None
-
+        confession_text = f"{heading_text}\n\n{defang_everyone_here(content)}"
         try:
             sent = await dest_channel.send(
-                content=message_title,
-                embed=emb,
+                content=confession_text,
                 view=self.bot.build_reply_view(),
                 allowed_mentions=discord.AllowedMentions.none()
             )
