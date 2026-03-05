@@ -1,28 +1,22 @@
 """
-Confessions Bot (stateless content, restart-persistent anonymous replies)
+Confessions Bot (stored thread metadata, restart-persistent anonymous replies)
 - discord.py (latest) slash commands + modals + buttons
-- No confession storage required
-- Reply button custom_id encodes target channel/message + HMAC signature
-- Persists only guild config + optional rate-limits in SQLite
+- Persists guild config, rate-limits, and minimal thread metadata in SQLite
 
 Run:
   python bot.py
 
 Env:
   DISCORD_TOKEN=...
-  CONFESSION_HMAC_SECRET=long_random_string
   DB_PATH=confessions.sqlite3   (optional; default)
 """
 
 from __future__ import annotations
 
 import os
-import hmac
-import base64
 import json
 import time
 import sqlite3
-import hashlib
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Any
 from dotenv import load_dotenv
@@ -37,13 +31,6 @@ from discord import app_commands
 def now_ts() -> int:
     return int(time.time())
 
-def b64url_nopad(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
-
-def b64url_decode_nopad(s: str) -> bytes:
-    pad = "=" * ((4 - len(s) % 4) % 4)
-    return base64.urlsafe_b64decode(s + pad)
-
 def defang_everyone_here(text: str) -> str:
     # Extra safety beyond AllowedMentions.none()
     return (
@@ -57,7 +44,7 @@ def jump_link(guild_id: int, channel_id: int, message_id: int) -> str:
 load_dotenv()
 
 # -----------------------------
-# Persistence (config/state only)
+# Persistence (config + rate-limits + thread metadata)
 # -----------------------------
 @dataclass
 class GuildConfig:
@@ -69,6 +56,7 @@ class GuildConfig:
     max_attachments: int = 4
     panic: bool = False
     replies_enabled: bool = True
+    notify_op_on_reply: bool = False
     per_day_limit: int = 0
     launcher_channel_id: int = 0
     launcher_message_id: int = 0
@@ -99,6 +87,7 @@ class ConfigStore:
                     max_attachments INTEGER NOT NULL DEFAULT 4,
                     panic INTEGER NOT NULL DEFAULT 0,
                     replies_enabled INTEGER NOT NULL DEFAULT 1,
+                    notify_op_on_reply INTEGER NOT NULL DEFAULT 0,
                     per_day_limit INTEGER NOT NULL DEFAULT 0,
                     launcher_channel_id INTEGER NOT NULL DEFAULT 0,
                     launcher_message_id INTEGER NOT NULL DEFAULT 0,
@@ -110,6 +99,8 @@ class ConfigStore:
                 conn.execute("ALTER TABLE guild_config ADD COLUMN launcher_channel_id INTEGER NOT NULL DEFAULT 0")
             if "launcher_message_id" not in cols:
                 conn.execute("ALTER TABLE guild_config ADD COLUMN launcher_message_id INTEGER NOT NULL DEFAULT 0")
+            if "notify_op_on_reply" not in cols:
+                conn.execute("ALTER TABLE guild_config ADD COLUMN notify_op_on_reply INTEGER NOT NULL DEFAULT 0")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS rate_limits (
                     guild_id INTEGER NOT NULL,
@@ -121,6 +112,22 @@ class ConfigStore:
                     PRIMARY KEY (guild_id, author_id)
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS thread_posts (
+                    guild_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    root_message_id INTEGER NOT NULL,
+                    original_author_id INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guild_id, message_id)
+                )
+            """)
+            thread_cols = {row["name"] for row in conn.execute("PRAGMA table_info(thread_posts)").fetchall()}
+            if "created_at" not in thread_cols:
+                conn.execute("ALTER TABLE thread_posts ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_thread_posts_created_at ON thread_posts(created_at)")
+        self.purge_old_thread_posts()
 
     def get_config(self, guild_id: int) -> Optional[GuildConfig]:
         with self._conn() as conn:
@@ -139,6 +146,7 @@ class ConfigStore:
                 max_attachments=row["max_attachments"],
                 panic=bool(row["panic"]),
                 replies_enabled=bool(row["replies_enabled"]),
+                notify_op_on_reply=bool(row["notify_op_on_reply"]) if "notify_op_on_reply" in row.keys() else False,
                 per_day_limit=row["per_day_limit"],
                 launcher_channel_id=row["launcher_channel_id"],
                 launcher_message_id=row["launcher_message_id"],
@@ -150,10 +158,10 @@ class ConfigStore:
             conn.execute("""
                 INSERT INTO guild_config (
                     guild_id, dest_channel_id, log_channel_id, cooldown_seconds,
-                    max_chars, max_attachments, panic, replies_enabled, per_day_limit,
-                    launcher_channel_id, launcher_message_id, blocked_user_ids
+                    max_chars, max_attachments, panic, replies_enabled, notify_op_on_reply,
+                    per_day_limit, launcher_channel_id, launcher_message_id, blocked_user_ids
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                     dest_channel_id=excluded.dest_channel_id,
                     log_channel_id=excluded.log_channel_id,
@@ -162,6 +170,7 @@ class ConfigStore:
                     max_attachments=excluded.max_attachments,
                     panic=excluded.panic,
                     replies_enabled=excluded.replies_enabled,
+                    notify_op_on_reply=excluded.notify_op_on_reply,
                     per_day_limit=excluded.per_day_limit,
                     launcher_channel_id=excluded.launcher_channel_id,
                     launcher_message_id=excluded.launcher_message_id,
@@ -169,6 +178,7 @@ class ConfigStore:
             """, (
                 cfg.guild_id, cfg.dest_channel_id, cfg.log_channel_id, cfg.cooldown_seconds,
                 cfg.max_chars, cfg.max_attachments, int(cfg.panic), int(cfg.replies_enabled),
+                int(cfg.notify_op_on_reply),
                 cfg.per_day_limit, cfg.launcher_channel_id, cfg.launcher_message_id,
                 json.dumps(cfg.blocked_user_ids or []),
             ))
@@ -177,11 +187,49 @@ class ConfigStore:
         if field not in {
             "dest_channel_id", "log_channel_id", "cooldown_seconds", "max_chars",
             "max_attachments", "panic", "replies_enabled", "per_day_limit",
-            "launcher_channel_id", "launcher_message_id", "blocked_user_ids"
+            "notify_op_on_reply", "launcher_channel_id", "launcher_message_id", "blocked_user_ids"
         }:
             raise ValueError("Invalid field")
         with self._conn() as conn:
             conn.execute(f"UPDATE guild_config SET {field}=? WHERE guild_id=?", (value, guild_id))
+
+    def upsert_thread_post(
+        self,
+        guild_id: int,
+        message_id: int,
+        channel_id: int,
+        root_message_id: int,
+        original_author_id: int
+    ) -> None:
+        created_at = now_ts()
+        with self._conn() as conn:
+            conn.execute("""
+                INSERT INTO thread_posts (guild_id, message_id, channel_id, root_message_id, original_author_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, message_id) DO UPDATE SET
+                    channel_id=excluded.channel_id,
+                    root_message_id=excluded.root_message_id,
+                    original_author_id=excluded.original_author_id,
+                    created_at=excluded.created_at
+            """, (guild_id, message_id, channel_id, root_message_id, original_author_id, created_at))
+        self.purge_old_thread_posts()
+
+    def get_thread_info(self, guild_id: int, message_id: int) -> Optional[Tuple[int, int]]:
+        with self._conn() as conn:
+            row = conn.execute("""
+                SELECT root_message_id, original_author_id
+                FROM thread_posts
+                WHERE guild_id=? AND message_id=?
+            """, (guild_id, message_id)).fetchone()
+            if not row:
+                return None
+            return int(row["root_message_id"]), int(row["original_author_id"])
+
+    def purge_old_thread_posts(self, max_age_seconds: int = 7 * 24 * 60 * 60) -> int:
+        cutoff = now_ts() - max_age_seconds
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM thread_posts WHERE created_at < ?", (cutoff,))
+            return max(cur.rowcount, 0)
 
     # --- rate limits ---
     def _day_key(self) -> str:
@@ -252,26 +300,6 @@ class ConfigStore:
             """, (guild_id, author_id, last_confess_at, last_reply_at, stored_day_key, day_count))
 
         return True, "ok"
-
-
-# -----------------------------
-# HMAC signing for button custom_id
-# -----------------------------
-class CustomIdSigner:
-    def __init__(self, secret: str):
-        if not secret or len(secret) < 16:
-            raise RuntimeError("CONFESSION_HMAC_SECRET must be set and at least 16 chars.")
-        self.secret = secret.encode("utf-8")
-
-    def sign(self, payload: str, *, nbytes: int = 10) -> str:
-        digest = hmac.new(self.secret, payload.encode("utf-8"), hashlib.sha256).digest()
-        return b64url_nopad(digest[:nbytes])
-
-    def verify(self, payload: str, sig: str) -> bool:
-        expected = self.sign(payload)
-        # Constant-time compare
-        return hmac.compare_digest(expected, sig)
-
 
 # -----------------------------
 # Embeds + Logging
@@ -425,25 +453,16 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         emb = build_confession_embed(content)
         message_title = defang_everyone_here(title) if title else None
 
-        # Build signed reply button custom_id based on final message ids (we need message_id -> send first, then edit with view)
-        # We'll send without view, then edit to add the button with correct message_id.
         try:
             sent = await dest_channel.send(
                 content=message_title,
                 embed=emb,
+                view=self.bot.build_reply_view(),
                 allowed_mentions=discord.AllowedMentions.none()
             )
         except discord.HTTPException:
             await self.bot._safe_ephemeral(interaction, "Failed to post confession (missing perms?).")
             return
-
-        view = self.bot.build_reply_view(interaction.guild.id, dest_channel.id, sent.id)
-
-        try:
-            await sent.edit(view=view)
-        except discord.HTTPException:
-            # Not fatal; replies won’t work for this confession
-            pass
 
         # Log (best effort)
         await log_confession(
@@ -454,6 +473,13 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             dest_message_id=sent.id,
             title=title,
             content=content,
+        )
+        self.bot.store.upsert_thread_post(
+            guild_id=interaction.guild.id,
+            message_id=sent.id,
+            channel_id=dest_channel.id,
+            root_message_id=sent.id,
+            original_author_id=interaction.user.id,
         )
 
         await self.bot.refresh_confess_launcher(interaction.guild.id, trigger_channel_id=dest_channel.id)
@@ -475,14 +501,12 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
         cfg: GuildConfig,
         parent_channel_id: int,
         parent_message_id: int,
-        expected_custom_id: Optional[str] = None,
     ):
         super().__init__()
         self.bot = bot
         self.cfg = cfg
         self.parent_channel_id = parent_channel_id
         self.parent_message_id = parent_message_id
-        self.expected_custom_id = expected_custom_id
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         assert interaction.guild and interaction.user
@@ -549,22 +573,41 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             await self.bot._safe_ephemeral(interaction, "Couldn't load that message.")
             return
 
+        thread_info = self.bot.store.get_thread_info(interaction.guild.id, parent_msg.id)
+        root_message_id = parent_msg.id
+        original_author_id = 0
+        if thread_info:
+            root_message_id, original_author_id = thread_info
+
         reply_content = build_reply_content(content)
 
         try:
             reply_msg = await dest_channel.send(
                 content=reply_content,
                 reference=parent_msg,
+                view=self.bot.build_reply_view(),
                 allowed_mentions=discord.AllowedMentions.none()
             )
         except discord.HTTPException:
             await self.bot._safe_ephemeral(interaction, "Failed to post reply (missing perms?).")
             return
 
-        try:
-            await reply_msg.edit(view=self.bot.build_reply_view(interaction.guild.id, dest_channel.id, reply_msg.id))
-        except discord.HTTPException:
-            pass
+        self.bot.store.upsert_thread_post(
+            guild_id=interaction.guild.id,
+            message_id=reply_msg.id,
+            channel_id=dest_channel.id,
+            root_message_id=root_message_id,
+            original_author_id=original_author_id,
+        )
+
+        if cfg.notify_op_on_reply and original_author_id > 0 and original_author_id != interaction.user.id:
+            await self.bot.notify_original_poster(
+                guild=interaction.guild,
+                original_author_id=original_author_id,
+                reply_channel_id=dest_channel.id,
+                reply_message_id=reply_msg.id,
+                root_message_id=root_message_id,
+            )
 
         await log_reply(
             log_channel=log_channel,
@@ -585,7 +628,7 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
 # Bot
 # -----------------------------
 class ConfessionsBot(discord.Client):
-    def __init__(self, store: ConfigStore, signer: CustomIdSigner):
+    def __init__(self, store: ConfigStore):
         intents = discord.Intents.default()
         intents.guilds = True
         intents.messages = True  # needed for fetch_message
@@ -593,41 +636,65 @@ class ConfessionsBot(discord.Client):
 
         self.tree = app_commands.CommandTree(self)
         self.store = store
-        self.signer = signer
 
         self._register_commands()
 
-    def is_valid_reply_target_message(self, msg: discord.Message, expected_custom_id: Optional[str] = None) -> bool:
-        # Accept bot-authored confession/reply embeds, or any bot-authored message that still carries
-        # the signed anonymous-reply button we generated for it.
+    async def notify_original_poster(
+        self,
+        *,
+        guild: discord.Guild,
+        original_author_id: int,
+        reply_channel_id: int,
+        reply_message_id: int,
+        root_message_id: int,
+    ) -> None:
+        member = guild.get_member(original_author_id)
+        user: Optional[discord.abc.User] = member
+        if user is None:
+            try:
+                user = await self.fetch_user(original_author_id)
+            except discord.HTTPException:
+                return
+
+        if user is None:
+            return
+
+        reply_link = jump_link(guild.id, reply_channel_id, reply_message_id)
+        root_link = jump_link(guild.id, reply_channel_id, root_message_id)
+        text = (
+            f"Someone replied to your anonymous confession in **{guild.name}**.\n"
+            f"Reply: {reply_link}\n"
+            f"Confession: {root_link}"
+        )
+        try:
+            await user.send(text, allowed_mentions=discord.AllowedMentions.none())
+        except (discord.Forbidden, discord.HTTPException):
+            return
+
+    def is_valid_reply_target_message(self, guild_id: int, msg: discord.Message) -> bool:
         if not self.user or msg.author.id != self.user.id:
             return False
 
-        if expected_custom_id:
-            for row in msg.components:
-                for child in row.children:
-                    if isinstance(child, discord.ui.Button) and child.custom_id == expected_custom_id:
-                        return True
-                    if getattr(child, "custom_id", None) == expected_custom_id:
-                        return True
+        # Primary source of truth is our stored thread metadata.
+        thread_info = self.store.get_thread_info(guild_id, msg.id)
+        if thread_info:
+            return True
 
-        if not msg.embeds:
-            return False
+        # Legacy fallback for older signed reply buttons created before thread metadata existed.
+        for row in msg.components:
+            for child in row.children:
+                custom_id = getattr(child, "custom_id", None)
+                if isinstance(custom_id, str) and custom_id.startswith("cr|"):
+                    return True
+        return False
 
-        title = (msg.embeds[0].title or "").strip().lower()
-        return title.startswith("confession") or title.startswith("anonymous reply")
-
-    def build_reply_view(self, guild_id: int, channel_id: int, message_id: int) -> discord.ui.View:
-        payload = f"{guild_id}|{channel_id}|{message_id}"
-        sig = self.signer.sign(payload)
-        custom_id = f"cr|{guild_id}|{channel_id}|{message_id}|{sig}"
-
+    def build_reply_view(self) -> discord.ui.View:
         view = discord.ui.View(timeout=None)
         view.add_item(
             discord.ui.Button(
                 label="Reply anonymously",
                 style=discord.ButtonStyle.secondary,
-                custom_id=custom_id,
+                custom_id="cr",
             )
         )
         return view
@@ -732,6 +799,7 @@ class ConfessionsBot(discord.Client):
                 f"**Max chars:** {cfg.max_chars}\n"
                 f"**Max attachments:** {cfg.max_attachments}\n"
                 f"**Replies enabled:** {cfg.replies_enabled}\n"
+                f"**Ping OP on reply (DM):** {cfg.notify_op_on_reply}\n"
                 f"**Panic:** {cfg.panic}\n"
                 f"**Per-day limit:** {cfg.per_day_limit or 'off'}\n"
                 f"**Blocked users:** {len(cfg.blocked_set())}\n"
@@ -800,6 +868,14 @@ class ConfessionsBot(discord.Client):
             cfg.replies_enabled = bool(on)
             self.store.upsert_config(cfg)
             await interaction.response.send_message(f"Anonymous replies enabled = **{on}**", ephemeral=True)
+
+        @config_group.command(name="ping-op", description="DM original poster when a new anonymous reply is posted.")
+        async def set_ping_op(interaction: discord.Interaction, on: bool):
+            await self._admin_gate(interaction)
+            cfg = self._require_cfg(interaction.guild.id)
+            cfg.notify_op_on_reply = bool(on)
+            self.store.upsert_config(cfg)
+            await interaction.response.send_message(f"Ping OP on reply (DM) = **{on}**", ephemeral=True)
 
         @config_group.command(name="perday", description="Set per-day confession limit (0 = off).")
         async def set_perday(interaction: discord.Interaction, n: app_commands.Range[int, 0, 100]):
@@ -902,7 +978,7 @@ class ConfessionsBot(discord.Client):
 
         await self.refresh_confess_launcher(message.guild.id, trigger_channel_id=message.channel.id)
 
-    # --- Restart-persistent reply handling (stateless) ---
+    # --- Restart-persistent reply handling ---
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         try:
             if interaction.type != discord.InteractionType.component:
@@ -929,31 +1005,14 @@ class ConfessionsBot(discord.Client):
                 await interaction.response.send_modal(modal)
                 return
 
-            if not custom_id.startswith("cr|"):
+            # Accept new static reply button id and legacy signed ids.
+            if custom_id != "cr" and not custom_id.startswith("cr|"):
                 return
-
-            # Parse: cr|g|c|m|sig
-            parts = custom_id.split("|")
-            if len(parts) != 5:
-                await self._safe_ephemeral(interaction, "Invalid reply button.")
-                return
-
-            _, g_str, c_str, m_str, sig = parts
-            if not (g_str.isdigit() and c_str.isdigit() and m_str.isdigit()):
-                await self._safe_ephemeral(interaction, "Invalid reply button.")
-                return
-
-            g = int(g_str); c = int(c_str); m = int(m_str)
-            if not interaction.guild or interaction.guild.id != g:
+            if not interaction.guild:
                 await self._safe_ephemeral(interaction, "Invalid reply target.")
                 return
 
-            payload = f"{g}|{c}|{m}"
-            if not self.signer.verify(payload, sig):
-                await self._safe_ephemeral(interaction, "Invalid reply button (signature).")
-                return
-
-            cfg = self.store.get_config(g)
+            cfg = self.store.get_config(interaction.guild.id)
             if not cfg:
                 await self._safe_ephemeral(interaction, "Bot is not configured.")
                 return
@@ -964,40 +1023,32 @@ class ConfessionsBot(discord.Client):
                 await self._safe_ephemeral(interaction, "Anonymous replies are disabled on this server.")
                 return
             if interaction.user and interaction.user.id in cfg.blocked_set():
-                await self._safe_ephemeral(interaction, "You can’t submit anonymous replies on this server.")
+                await self._safe_ephemeral(interaction, "You can't submit anonymous replies on this server.")
                 return
 
-            # Quick validation that target exists and is one of the bot's replyable posts.
-            channel = interaction.guild.get_channel(c)
-            if not isinstance(channel, discord.TextChannel):
+            target_msg = interaction.message
+            if target_msg is None:
                 await self._safe_ephemeral(interaction, "That message no longer exists.")
                 return
 
-            try:
-                msg = await channel.fetch_message(m)
-            except discord.NotFound:
+            target_channel = target_msg.channel
+            if not isinstance(target_channel, discord.TextChannel):
                 await self._safe_ephemeral(interaction, "That message no longer exists.")
                 return
-            except discord.HTTPException:
-                await self._safe_ephemeral(interaction, "Couldn’t load that message.")
-                return
 
-            if not self.is_valid_reply_target_message(msg, expected_custom_id=custom_id):
-                await self._safe_ephemeral(interaction, "This message can’t be replied to anonymously.")
+            if not self.is_valid_reply_target_message(interaction.guild.id, target_msg):
+                await self._safe_ephemeral(interaction, "This message can't be replied to anonymously.")
                 return
 
             modal = ReplyModal(
                 self,
                 cfg,
-                parent_channel_id=c,
-                parent_message_id=m,
-                expected_custom_id=custom_id,
+                parent_channel_id=target_channel.id,
+                parent_message_id=target_msg.id,
             )
-            # For component interactions, you can respond with a modal
             await interaction.response.send_modal(modal)
 
         except Exception:
-            # Avoid crashing on interaction handler; fail silently or minimal ephemeral
             try:
                 await self._safe_ephemeral(interaction, "Something went wrong handling that reply.")
             except Exception:
@@ -1020,18 +1071,15 @@ class ConfessionsBot(discord.Client):
 # -----------------------------
 def main() -> None:
     token = os.getenv("DISCORD_TOKEN")
-    secret = os.getenv("CONFESSION_HMAC_SECRET")
     db_path = os.getenv("DB_PATH", "confessions.sqlite3")
 
     if not token:
         raise RuntimeError("DISCORD_TOKEN env var is required.")
-    if not secret:
-        raise RuntimeError("CONFESSION_HMAC_SECRET env var is required.")
 
     store = ConfigStore(db_path=db_path)
-    signer = CustomIdSigner(secret=secret)
-    bot = ConfessionsBot(store=store, signer=signer)
+    bot = ConfessionsBot(store=store)
     bot.run(token)
 
 if __name__ == "__main__":
     main()
+
