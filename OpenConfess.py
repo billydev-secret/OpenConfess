@@ -41,6 +41,18 @@ def defang_everyone_here(text: str) -> str:
 def jump_link(guild_id: int, channel_id: int, message_id: int) -> str:
     return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
 
+def parse_yes_no(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    text = value.strip().lower()
+    if text == "":
+        return None
+    if text in {"yes", "y", "true", "on", "1"}:
+        return True
+    if text in {"no", "n", "false", "off", "0"}:
+        return False
+    return None
+
 load_dotenv()
 
 # -----------------------------
@@ -119,11 +131,14 @@ class ConfigStore:
                     channel_id INTEGER NOT NULL,
                     root_message_id INTEGER NOT NULL,
                     original_author_id INTEGER NOT NULL,
+                    notify_original_author INTEGER NOT NULL DEFAULT -1,
                     created_at INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (guild_id, message_id)
                 )
             """)
             thread_cols = {row["name"] for row in conn.execute("PRAGMA table_info(thread_posts)").fetchall()}
+            if "notify_original_author" not in thread_cols:
+                conn.execute("ALTER TABLE thread_posts ADD COLUMN notify_original_author INTEGER NOT NULL DEFAULT -1")
             if "created_at" not in thread_cols:
                 conn.execute("ALTER TABLE thread_posts ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_thread_posts_created_at ON thread_posts(created_at)")
@@ -199,31 +214,39 @@ class ConfigStore:
         message_id: int,
         channel_id: int,
         root_message_id: int,
-        original_author_id: int
+        original_author_id: int,
+        notify_original_author: int = -1,
     ) -> None:
         created_at = now_ts()
         with self._conn() as conn:
             conn.execute("""
-                INSERT INTO thread_posts (guild_id, message_id, channel_id, root_message_id, original_author_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO thread_posts (
+                    guild_id, message_id, channel_id, root_message_id,
+                    original_author_id, notify_original_author, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(guild_id, message_id) DO UPDATE SET
                     channel_id=excluded.channel_id,
                     root_message_id=excluded.root_message_id,
                     original_author_id=excluded.original_author_id,
+                    notify_original_author=excluded.notify_original_author,
                     created_at=excluded.created_at
-            """, (guild_id, message_id, channel_id, root_message_id, original_author_id, created_at))
+            """, (
+                guild_id, message_id, channel_id, root_message_id,
+                original_author_id, int(notify_original_author), created_at
+            ))
         self.purge_old_thread_posts()
 
-    def get_thread_info(self, guild_id: int, message_id: int) -> Optional[Tuple[int, int]]:
+    def get_thread_info(self, guild_id: int, message_id: int) -> Optional[Tuple[int, int, int]]:
         with self._conn() as conn:
             row = conn.execute("""
-                SELECT root_message_id, original_author_id
+                SELECT root_message_id, original_author_id, notify_original_author
                 FROM thread_posts
                 WHERE guild_id=? AND message_id=?
             """, (guild_id, message_id)).fetchone()
             if not row:
                 return None
-            return int(row["root_message_id"]), int(row["original_author_id"])
+            return int(row["root_message_id"]), int(row["original_author_id"]), int(row["notify_original_author"])
 
     def purge_old_thread_posts(self, max_age_seconds: int = 7 * 24 * 60 * 60) -> int:
         cutoff = now_ts() - max_age_seconds
@@ -376,6 +399,13 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         max_length=4000,  # we'll enforce guild max_chars later
         placeholder="Say it plainly. No names if you can help it."
     )
+    ping_on_reply = discord.ui.TextInput(
+        label="Ping you on replies? (yes/no)",
+        style=discord.TextStyle.short,
+        required=False,
+        max_length=5,
+        placeholder="yes / no (blank = server default)"
+    )
 
     def __init__(
         self,
@@ -404,12 +434,19 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             return
 
         content = str(self.confession.value).strip()
+        ping_pref_raw = str(self.ping_on_reply.value).strip() if self.ping_on_reply.value else ""
+        ping_pref = parse_yes_no(ping_pref_raw)
+        if ping_pref is None and ping_pref_raw:
+            await self.bot._safe_ephemeral(interaction, "Use `yes` or `no` for ping preference (or leave blank).")
+            return
+        if ping_pref is None:
+            ping_pref = bool(cfg.notify_op_on_reply)
 
         if len(content) == 0:
             await self.bot._safe_ephemeral(interaction, "Confession can't be empty.")
             return
 
-        heading_text = "# "
+        heading_text = "# Anonymous Confession"
         # Discord content max is 2000 chars including heading and separators.
         confession_max_chars = min(cfg.max_chars, max(1, 2000 - len(heading_text) - 2))
         if len(content) > confession_max_chars:
@@ -469,10 +506,11 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             channel_id=dest_channel.id,
             root_message_id=sent.id,
             original_author_id=interaction.user.id,
+            notify_original_author=1 if ping_pref else 0,
         )
 
         await self.bot.refresh_confess_launcher(interaction.guild.id, trigger_channel_id=dest_channel.id)
-        await self.bot._safe_ephemeral(interaction, "Confession posted.")
+        await self.bot._safe_complete(interaction)
 
 
 class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
@@ -565,8 +603,11 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
         thread_info = self.bot.store.get_thread_info(interaction.guild.id, parent_msg.id)
         root_message_id = parent_msg.id
         original_author_id = 0
+        notify_original_author = 1 if cfg.notify_op_on_reply else 0
         if thread_info:
-            root_message_id, original_author_id = thread_info
+            root_message_id, original_author_id, notify_original_author = thread_info
+            if notify_original_author not in (0, 1):
+                notify_original_author = 1 if cfg.notify_op_on_reply else 0
 
         reply_content = build_reply_content(content)
 
@@ -587,9 +628,10 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             channel_id=dest_channel.id,
             root_message_id=root_message_id,
             original_author_id=original_author_id,
+            notify_original_author=notify_original_author,
         )
 
-        if cfg.notify_op_on_reply and original_author_id > 0 and original_author_id != interaction.user.id:
+        if notify_original_author == 1 and original_author_id > 0 and original_author_id != interaction.user.id:
             await self.bot.notify_original_poster(
                 guild=interaction.guild,
                 original_author_id=original_author_id,
@@ -610,7 +652,7 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
         )
 
         await self.bot.refresh_confess_launcher(interaction.guild.id, trigger_channel_id=dest_channel.id)
-        await self.bot._safe_ephemeral(interaction, "Reply posted.")
+        await self.bot._safe_complete(interaction)
 
 
 # -----------------------------
@@ -1052,6 +1094,14 @@ class ConfessionsBot(discord.Client):
         else:
             try:
                 await interaction.response.send_message(message, ephemeral=True)
+            except Exception:
+                pass
+
+    async def _safe_complete(self, interaction: discord.Interaction) -> None:
+        # If we deferred with "thinking", remove the placeholder without sending a success message.
+        if interaction.response.is_done():
+            try:
+                await interaction.delete_original_response()
             except Exception:
                 pass
 
