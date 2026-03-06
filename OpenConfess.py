@@ -899,7 +899,7 @@ class ConfessionsBot(discord.Client):
         await self.tree.sync()
 
     def _register_commands(self) -> None:
-        @self.tree.command(name="dmrequest", description="Open a modal to request a private DM with staff.")
+        @self.tree.command(name="dmrequest", description="Send moderators a private DM request.")
         async def dmrequest(interaction: discord.Interaction):
             if not interaction.guild or not interaction.user:
                 await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
@@ -907,7 +907,7 @@ class ConfessionsBot(discord.Client):
             await interaction.response.send_modal(DMRequestModal(self))
 
         # /confess command (with attachments)
-        @self.tree.command(name="confess", description="Post an anonymous confession.")
+        @self.tree.command(name="confess", description="Open the anonymous confession form.")
         async def confess(
             interaction: discord.Interaction,
         ):
@@ -919,9 +919,9 @@ class ConfessionsBot(discord.Client):
             await interaction.response.send_modal(modal)
 
         # Admin config group
-        config_group = app_commands.Group(name="confession", description="Confession bot admin tools")
+        config_group = app_commands.Group(name="confession", description="Admin tools for anonymous confessions")
 
-        @config_group.command(name="status", description="Show current configuration.")
+        @config_group.command(name="status", description="Show this server's confession settings.")
         async def status(interaction: discord.Interaction):
             if not interaction.guild:
                 await interaction.response.send_message("Server-only.", ephemeral=True)
@@ -952,7 +952,7 @@ class ConfessionsBot(discord.Client):
             )
             await interaction.response.send_message(msg, ephemeral=True)
 
-        @config_group.command(name="set-dest", description="Set destination channel for confessions.")
+        @config_group.command(name="set-dest", description="Set where anonymous confessions are posted.")
         @app_commands.describe(channel="Destination channel")
         async def set_dest(interaction: discord.Interaction, channel: discord.TextChannel):
             await self._admin_gate(interaction)
@@ -964,7 +964,7 @@ class ConfessionsBot(discord.Client):
             self.store.upsert_config(cfg)
             await interaction.response.send_message(f"Destination set to {channel.mention}", ephemeral=True)
 
-        @config_group.command(name="set-log", description="Set private log channel.")
+        @config_group.command(name="set-log", description="Set where private moderation logs are posted.")
         @app_commands.describe(channel="Log channel")
         async def set_log(interaction: discord.Interaction, channel: discord.TextChannel):
             await self._admin_gate(interaction)
@@ -975,7 +975,7 @@ class ConfessionsBot(discord.Client):
             self.store.upsert_config(cfg)
             await interaction.response.send_message(f"Log channel set to {channel.mention}", ephemeral=True)
 
-        @config_group.command(name="cooldown", description="Set cooldown between confessions (seconds).")
+        @config_group.command(name="cooldown", description="Set per-user cooldown between posts (seconds).")
         async def set_cooldown(interaction: discord.Interaction, seconds: app_commands.Range[int, 0, 86400]):
             await self._admin_gate(interaction)
             cfg = self._require_cfg(interaction.guild.id)
@@ -983,7 +983,7 @@ class ConfessionsBot(discord.Client):
             self.store.upsert_config(cfg)
             await interaction.response.send_message(f"Cooldown set to {seconds}s", ephemeral=True)
 
-        @config_group.command(name="maxchars", description="Set max confession/reply length.")
+        @config_group.command(name="maxchars", description="Set max characters for confessions and replies.")
         async def set_maxchars(interaction: discord.Interaction, n: app_commands.Range[int, 100, 4000]):
             await self._admin_gate(interaction)
             cfg = self._require_cfg(interaction.guild.id)
@@ -991,7 +991,7 @@ class ConfessionsBot(discord.Client):
             self.store.upsert_config(cfg)
             await interaction.response.send_message(f"Max chars set to {n}", ephemeral=True)
 
-        @config_group.command(name="maxattachments", description="Set max attachments on confessions.")
+        @config_group.command(name="maxattachments", description="Set max attachments allowed per confession.")
         async def set_maxattachments(interaction: discord.Interaction, n: app_commands.Range[int, 0, 4]):
             await self._admin_gate(interaction)
             cfg = self._require_cfg(interaction.guild.id)
@@ -999,7 +999,7 @@ class ConfessionsBot(discord.Client):
             self.store.upsert_config(cfg)
             await interaction.response.send_message(f"Max attachments set to {n}", ephemeral=True)
 
-        @config_group.command(name="panic", description="Toggle panic mode (disables confessions and replies).")
+        @config_group.command(name="panic", description="Enable or disable panic mode (pauses confessions/replies).")
         async def set_panic(interaction: discord.Interaction, on: bool):
             await self._admin_gate(interaction)
             cfg = self._require_cfg(interaction.guild.id)
@@ -1007,7 +1007,7 @@ class ConfessionsBot(discord.Client):
             self.store.upsert_config(cfg)
             await interaction.response.send_message(f"Panic mode set to **{on}**", ephemeral=True)
 
-        @config_group.command(name="replies", description="Enable/disable anonymous replies.")
+        @config_group.command(name="replies", description="Enable or disable anonymous replies.")
         async def set_replies(interaction: discord.Interaction, on: bool):
             await self._admin_gate(interaction)
             cfg = self._require_cfg(interaction.guild.id)
@@ -1015,7 +1015,7 @@ class ConfessionsBot(discord.Client):
             self.store.upsert_config(cfg)
             await interaction.response.send_message(f"Anonymous replies enabled = **{on}**", ephemeral=True)
 
-        @config_group.command(name="ping-op", description="DM original poster when a new anonymous reply is posted.")
+        @config_group.command(name="ping-op", description="DM original posters when new anonymous replies are posted.")
         async def set_ping_op(interaction: discord.Interaction, on: bool):
             await self._admin_gate(interaction)
             cfg = self._require_cfg(interaction.guild.id)
@@ -1023,7 +1023,7 @@ class ConfessionsBot(discord.Client):
             self.store.upsert_config(cfg)
             await interaction.response.send_message(f"Ping OP on reply (DM) = **{on}**", ephemeral=True)
 
-        @config_group.command(name="perday", description="Set per-day confession limit (0 = off).")
+        @config_group.command(name="perday", description="Set per-user daily confession limit (0 to disable).")
         async def set_perday(interaction: discord.Interaction, n: app_commands.Range[int, 0, 100]):
             await self._admin_gate(interaction)
             cfg = self._require_cfg(interaction.guild.id)
@@ -1031,7 +1031,7 @@ class ConfessionsBot(discord.Client):
             self.store.upsert_config(cfg)
             await interaction.response.send_message(f"Per-day confession limit set to **{n or 'off'}**", ephemeral=True)
 
-        @config_group.command(name="block", description="Block or unblock a user from using /confess and replies.")
+        @config_group.command(name="block", description="Block or unblock a member from confessions/replies.")
         async def block_user(interaction: discord.Interaction, user: discord.Member, blocked: bool):
             await self._admin_gate(interaction)
             cfg = self._require_cfg(interaction.guild.id)
@@ -1047,7 +1047,7 @@ class ConfessionsBot(discord.Client):
                 ephemeral=True
             )
 
-        @config_group.command(name="post-button", description="Post a persistent New confession button in a channel.")
+        @config_group.command(name="post-button", description="Post or move the persistent Confess button.")
         @app_commands.describe(channel="Channel to post the button in")
         async def post_button(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
             await self._admin_gate(interaction)
