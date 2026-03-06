@@ -31,6 +31,7 @@ from discord import app_commands
 def now_ts() -> int:
     return int(time.time())
 
+
 def defang_everyone_here(text: str) -> str:
     # Extra safety beyond AllowedMentions.none()
     return (
@@ -38,10 +39,13 @@ def defang_everyone_here(text: str) -> str:
             .replace("@here", "@\u200bhere")
     )
 
+
 def jump_link(guild_id: int, channel_id: int, message_id: int) -> str:
     return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
 
+
 load_dotenv()
+
 
 # -----------------------------
 # Persistence (config + rate-limits + thread metadata)
@@ -64,6 +68,7 @@ class GuildConfig:
 
     def blocked_set(self) -> set[int]:
         return set(self.blocked_user_ids or [])
+
 
 class ConfigStore:
     def __init__(self, db_path: str):
@@ -290,7 +295,7 @@ class ConfigStore:
                 remaining = cooldown_seconds - (now - last_at)
                 return False, f"Slow down — you can {'reply' if is_reply else 'post'} again in **{remaining}s**."
 
-            if per_day_limit and per_day_limit > 0 and day_count >= per_day_limit:
+            if 0 < per_day_limit <= day_count:
                 return False, f"You’ve hit today’s limit (**{per_day_limit}**). Try again tomorrow."
 
             # bump
@@ -312,11 +317,13 @@ class ConfigStore:
 
         return True, "ok"
 
+
 # -----------------------------
 # Embeds + Logging
 # -----------------------------
 def build_reply_content(content: str) -> str:
     return defang_everyone_here(content)
+
 
 async def log_confession(
     *,
@@ -345,6 +352,7 @@ async def log_confession(
         return await log_channel.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
     except discord.HTTPException:
         return None
+
 
 async def log_reply(
     *,
@@ -400,6 +408,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         max_length=4000,  # we'll enforce guild max_chars later
         placeholder="Say it plainly. No names if you can help it."
     )
+
     def __init__(
         self,
         bot: "ConfessionsBot",
@@ -430,7 +439,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
 
         content = str(self.confession.value).strip()
         selected = self.ping_select.values[0] if self.ping_select.values else "yes"
-        ping_pref = (selected == "yes")
+        ping_pref = selected == "yes"
 
         if len(content) == 0:
             await self.bot._safe_ephemeral(interaction, "Confession can't be empty.")
@@ -1095,6 +1104,7 @@ class ConfessionsBot(discord.Client):
             except Exception:
                 pass
 
+
 # -----------------------------
 # Entrypoint
 # -----------------------------
@@ -1109,6 +1119,6 @@ def main() -> None:
     bot = ConfessionsBot(store=store)
     bot.run(token)
 
+
 if __name__ == "__main__":
     main()
-
