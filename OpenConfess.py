@@ -13,16 +13,20 @@ Env:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import json
 import time
 import sqlite3
+import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Any
 from dotenv import load_dotenv
 
 import discord
 from discord import app_commands
+
+log = logging.getLogger(__name__)
 
 
 # -----------------------------
@@ -295,7 +299,7 @@ class ConfigStore:
                 remaining = cooldown_seconds - (now - last_at)
                 return False, f"Slow down — you can {'reply' if is_reply else 'post'} again in **{remaining}s**."
 
-            if 0 < per_day_limit <= day_count:
+            if per_day_limit and per_day_limit > 0 and day_count >= per_day_limit:
                 return False, f"You’ve hit today’s limit (**{per_day_limit}**). Try again tomorrow."
 
             # bump
@@ -387,17 +391,52 @@ async def log_reply(
 # -----------------------------
 # Modals
 # -----------------------------
-class PingPreferenceSelect(discord.ui.Select):
-    def __init__(self):
-        super().__init__(
-            placeholder="Ping setting",
-            min_values=1,
-            max_values=1,
-            options=[
-                discord.SelectOption(label="Ping me on replies", value="yes", default=True),
-                discord.SelectOption(label="Do not ping me", value="no"),
-            ],
+class DMRequestModal(discord.ui.Modal, title="New DM Request"):
+    request = discord.ui.TextInput(
+        label="What do you need help with?",
+        style=discord.TextStyle.long,
+        required=True,
+        max_length=2000,
+        placeholder="Describe what you'd like to discuss in DMs."
+    )
+
+    def __init__(self, bot: "ConfessionsBot"):
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild and interaction.user
+
+        cfg = self.bot.store.get_config(interaction.guild.id)
+        if not cfg:
+            await self.bot._safe_ephemeral(interaction, "Bot is not configured. Ask an admin to set destination/log channels.")
+            return
+
+        log_channel = interaction.guild.get_channel(cfg.log_channel_id)
+        if not isinstance(log_channel, discord.TextChannel):
+            await self.bot._safe_ephemeral(interaction, "Bot config is invalid (missing log channel).")
+            return
+
+        request_text = str(self.request.value).strip()
+        if not request_text:
+            await self.bot._safe_ephemeral(interaction, "DM request can't be empty.")
+            return
+
+        emb = discord.Embed(
+            title="New DM Request",
+            description=defang_everyone_here(request_text),
+            timestamp=discord.utils.utcnow(),
         )
+        emb.add_field(name="Requester", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        emb.add_field(name="Guild", value=f"{interaction.guild.name} (`{interaction.guild.id}`)", inline=False)
+
+        try:
+            await log_channel.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            await self.bot._safe_ephemeral(interaction, "Failed to submit DM request (missing perms?).")
+            return
+
+        await self.bot._safe_ephemeral(interaction, "Your DM request was sent to moderators.")
 
 
 class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
@@ -408,6 +447,14 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         max_length=4000,  # we'll enforce guild max_chars later
         placeholder="Say it plainly. No names if you can help it."
     )
+    notify_pref = discord.ui.TextInput(
+        label="Notify me on replies? (yes/no)",
+        style=discord.TextStyle.short,
+        required=False,
+        default="yes",
+        max_length=3,
+        placeholder="yes",
+    )
 
     def __init__(
         self,
@@ -417,8 +464,6 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         super().__init__()
         self.bot = bot
         self.cfg = cfg
-        self.ping_select = PingPreferenceSelect()
-        self.add_item(self.ping_select)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         assert interaction.guild and interaction.user
@@ -438,16 +483,21 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             return
 
         content = str(self.confession.value).strip()
-        selected = self.ping_select.values[0] if self.ping_select.values else "yes"
-        ping_pref = selected == "yes"
+        pref = str(self.notify_pref.value or "").strip().lower()
+        if pref in ("", "y", "yes", "true", "1", "on"):
+            ping_pref = True
+        elif pref in ("n", "no", "false", "0", "off"):
+            ping_pref = False
+        else:
+            await self.bot._safe_ephemeral(interaction, "Invalid notify setting. Use `yes` or `no`.")
+            return
 
         if len(content) == 0:
             await self.bot._safe_ephemeral(interaction, "Confession can't be empty.")
             return
 
-        heading_text = "# Anonymous Confession"
-        # Discord content max is 2000 chars including heading and separators.
-        confession_max_chars = min(cfg.max_chars, max(1, 2000 - len(heading_text) - 2))
+        # Confession body itself is rendered as H1.
+        confession_max_chars = min(cfg.max_chars, max(1, 2000 - 2))
         if len(content) > confession_max_chars:
             await self.bot._safe_ephemeral(
                 interaction,
@@ -478,7 +528,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         except discord.HTTPException:
             return
 
-        confession_text = f"{heading_text}\n\n{defang_everyone_here(content)}"
+        confession_text = f"# {defang_everyone_here(content)}"
         try:
             sent = await dest_channel.send(
                 content=confession_text,
@@ -520,6 +570,14 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
         max_length=4000,
         placeholder="Reply kindly. Keep it about the content, not the person."
     )
+    notify_pref = discord.ui.TextInput(
+        label="Notify me on replies? (yes/no)",
+        style=discord.TextStyle.short,
+        required=False,
+        default="yes",
+        max_length=3,
+        placeholder="yes",
+    )
 
     def __init__(
         self,
@@ -555,6 +613,15 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             return
 
         content = str(self.reply.value).strip()
+        pref = str(self.notify_pref.value or "").strip().lower()
+        if pref in ("", "y", "yes", "true", "1", "on"):
+            my_notify_pref = 1
+        elif pref in ("n", "no", "false", "0", "off"):
+            my_notify_pref = 0
+        else:
+            await self.bot._safe_ephemeral(interaction, "Invalid notify setting. Use `yes` or `no`.")
+            return
+
         reply_max_chars = min(cfg.max_chars, 2000)
         if len(content) == 0:
             await self.bot._safe_ephemeral(interaction, "Reply can't be empty.")
@@ -601,12 +668,12 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
 
         thread_info = self.bot.store.get_thread_info(interaction.guild.id, parent_msg.id)
         root_message_id = parent_msg.id
-        original_author_id = 0
-        notify_original_author = 1 if cfg.notify_op_on_reply else 0
+        parent_author_id = 0
+        parent_notify_pref = 1 if cfg.notify_op_on_reply else 0
         if thread_info:
-            root_message_id, original_author_id, notify_original_author = thread_info
-            if notify_original_author not in (0, 1):
-                notify_original_author = 1 if cfg.notify_op_on_reply else 0
+            root_message_id, parent_author_id, parent_notify_pref = thread_info
+            if parent_notify_pref not in (0, 1):
+                parent_notify_pref = 1 if cfg.notify_op_on_reply else 0
 
         reply_content = build_reply_content(content)
 
@@ -626,14 +693,14 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             message_id=reply_msg.id,
             channel_id=dest_channel.id,
             root_message_id=root_message_id,
-            original_author_id=original_author_id,
-            notify_original_author=notify_original_author,
+            original_author_id=interaction.user.id,
+            notify_original_author=my_notify_pref,
         )
 
-        if notify_original_author == 1 and original_author_id > 0 and original_author_id != interaction.user.id:
+        if parent_notify_pref == 1 and parent_author_id > 0 and parent_author_id != interaction.user.id:
             await self.bot.notify_original_poster(
                 guild=interaction.guild,
-                original_author_id=original_author_id,
+                original_author_id=parent_author_id,
                 reply_channel_id=dest_channel.id,
                 reply_message_id=reply_msg.id,
                 root_message_id=root_message_id,
@@ -666,8 +733,48 @@ class ConfessionsBot(discord.Client):
 
         self.tree = app_commands.CommandTree(self)
         self.store = store
+        self._launcher_locks: dict[int, asyncio.Lock] = {}
 
         self._register_commands()
+
+    def _get_launcher_lock(self, guild_id: int) -> asyncio.Lock:
+        lock = self._launcher_locks.get(guild_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._launcher_locks[guild_id] = lock
+        return lock
+
+    def _message_has_confess_launcher(self, message: discord.Message, guild_id: int) -> bool:
+        target_custom_id = f"nc|{guild_id}"
+        for row in message.components:
+            for child in row.children:
+                if getattr(child, "custom_id", None) == target_custom_id:
+                    return True
+        return False
+
+    async def _cleanup_duplicate_launchers(
+        self,
+        channel: discord.TextChannel,
+        guild_id: int,
+        *,
+        keep_message_id: int,
+    ) -> None:
+        if not self.user:
+            return
+        try:
+            async for msg in channel.history(limit=50):
+                if msg.id == keep_message_id:
+                    continue
+                if msg.author.id != self.user.id:
+                    continue
+                if not self._message_has_confess_launcher(msg, guild_id):
+                    continue
+                try:
+                    await msg.delete()
+                except discord.HTTPException:
+                    continue
+        except discord.HTTPException:
+            return
 
     async def notify_original_poster(
         self,
@@ -722,7 +829,7 @@ class ConfessionsBot(discord.Client):
         view = discord.ui.View(timeout=None)
         view.add_item(
             discord.ui.Button(
-                label="Reply anonymously",
+                label="Reply",
                 style=discord.ButtonStyle.secondary,
                 custom_id="cr",
             )
@@ -733,7 +840,7 @@ class ConfessionsBot(discord.Client):
         view = discord.ui.View(timeout=None)
         view.add_item(
             discord.ui.Button(
-                label="New confession",
+                label="Confess",
                 style=discord.ButtonStyle.primary,
                 custom_id=f"nc|{guild_id}",
             )
@@ -750,46 +857,55 @@ class ConfessionsBot(discord.Client):
             return None
 
     async def refresh_confess_launcher(self, guild_id: int, *, trigger_channel_id: Optional[int] = None) -> None:
-        cfg = self.store.get_config(guild_id)
-        if not cfg or not cfg.launcher_channel_id:
-            return
-        if trigger_channel_id is not None and trigger_channel_id != cfg.launcher_channel_id:
-            return
+        async with self._get_launcher_lock(guild_id):
+            cfg = self.store.get_config(guild_id)
+            if not cfg or not cfg.launcher_channel_id:
+                return
+            if trigger_channel_id is not None and trigger_channel_id != cfg.launcher_channel_id:
+                return
 
-        guild = self.get_guild(guild_id)
-        if guild is None:
-            return
+            guild = self.get_guild(guild_id)
+            if guild is None:
+                return
 
-        channel = guild.get_channel(cfg.launcher_channel_id)
-        if not isinstance(channel, discord.TextChannel):
-            return
+            channel = guild.get_channel(cfg.launcher_channel_id)
+            if not isinstance(channel, discord.TextChannel):
+                return
 
-        if cfg.launcher_message_id:
-            try:
-                old_message = await channel.fetch_message(cfg.launcher_message_id)
-            except discord.NotFound:
-                old_message = None
-            except discord.HTTPException:
-                old_message = None
-            if old_message is not None:
+            if cfg.launcher_message_id:
                 try:
-                    await old_message.delete()
+                    old_message = await channel.fetch_message(cfg.launcher_message_id)
+                except discord.NotFound:
+                    old_message = None
                 except discord.HTTPException:
-                    return
+                    old_message = None
+                if old_message is not None:
+                    try:
+                        await old_message.delete()
+                    except discord.HTTPException:
+                        return
 
-        sent = await self._send_confess_launcher(channel)
-        if sent is None:
-            return
+            sent = await self._send_confess_launcher(channel)
+            if sent is None:
+                return
 
-        cfg.launcher_channel_id = channel.id
-        cfg.launcher_message_id = sent.id
-        self.store.upsert_config(cfg)
+            cfg.launcher_channel_id = channel.id
+            cfg.launcher_message_id = sent.id
+            self.store.upsert_config(cfg)
+            await self._cleanup_duplicate_launchers(channel, guild_id, keep_message_id=sent.id)
 
     async def setup_hook(self) -> None:
         # Sync commands globally (or per-guild for faster iteration)
         await self.tree.sync()
 
     def _register_commands(self) -> None:
+        @self.tree.command(name="dmrequest", description="Open a modal to request a private DM with staff.")
+        async def dmrequest(interaction: discord.Interaction):
+            if not interaction.guild or not interaction.user:
+                await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+                return
+            await interaction.response.send_modal(DMRequestModal(self))
+
         # /confess command (with attachments)
         @self.tree.command(name="confess", description="Post an anonymous confession.")
         async def confess(
@@ -936,42 +1052,44 @@ class ConfessionsBot(discord.Client):
         async def post_button(interaction: discord.Interaction, channel: Optional[discord.TextChannel] = None):
             await self._admin_gate(interaction)
 
-            target_channel = channel or interaction.channel
-            if not isinstance(target_channel, discord.TextChannel):
-                await interaction.response.send_message("Choose a text channel for the button.", ephemeral=True)
-                return
+            async with self._get_launcher_lock(interaction.guild.id):
+                target_channel = channel or interaction.channel
+                if not isinstance(target_channel, discord.TextChannel):
+                    await interaction.response.send_message("Choose a text channel for the button.", ephemeral=True)
+                    return
 
-            cfg = self.store.get_config(interaction.guild.id)
-            if not cfg:
-                cfg = GuildConfig(
-                    guild_id=interaction.guild.id,
-                    dest_channel_id=target_channel.id,
-                    log_channel_id=target_channel.id,
-                )
+                cfg = self.store.get_config(interaction.guild.id)
+                if not cfg:
+                    cfg = GuildConfig(
+                        guild_id=interaction.guild.id,
+                        dest_channel_id=target_channel.id,
+                        log_channel_id=target_channel.id,
+                    )
 
-            if cfg.launcher_channel_id and cfg.launcher_message_id:
-                old_channel = interaction.guild.get_channel(cfg.launcher_channel_id)
-                if isinstance(old_channel, discord.TextChannel):
-                    try:
-                        old_message = await old_channel.fetch_message(cfg.launcher_message_id)
-                    except discord.NotFound:
-                        old_message = None
-                    except discord.HTTPException:
-                        old_message = None
-                    if old_message is not None:
+                if cfg.launcher_channel_id and cfg.launcher_message_id:
+                    old_channel = interaction.guild.get_channel(cfg.launcher_channel_id)
+                    if isinstance(old_channel, discord.TextChannel):
                         try:
-                            await old_message.delete()
+                            old_message = await old_channel.fetch_message(cfg.launcher_message_id)
+                        except discord.NotFound:
+                            old_message = None
                         except discord.HTTPException:
-                            pass
+                            old_message = None
+                        if old_message is not None:
+                            try:
+                                await old_message.delete()
+                            except discord.HTTPException:
+                                pass
 
-            sent = await self._send_confess_launcher(target_channel)
-            if sent is None:
-                await interaction.response.send_message("Failed to post the confession button in that channel.", ephemeral=True)
-                return
+                sent = await self._send_confess_launcher(target_channel)
+                if sent is None:
+                    await interaction.response.send_message("Failed to post the confession button in that channel.", ephemeral=True)
+                    return
 
-            cfg.launcher_channel_id = target_channel.id
-            cfg.launcher_message_id = sent.id
-            self.store.upsert_config(cfg)
+                cfg.launcher_channel_id = target_channel.id
+                cfg.launcher_message_id = sent.id
+                self.store.upsert_config(cfg)
+                await self._cleanup_duplicate_launchers(target_channel, interaction.guild.id, keep_message_id=sent.id)
 
         self.tree.add_command(config_group)
 
@@ -1010,6 +1128,8 @@ class ConfessionsBot(discord.Client):
 
     # --- Restart-persistent reply handling ---
     async def on_interaction(self, interaction: discord.Interaction) -> None:
+        custom_id: Optional[str] = None
+        action = "interaction"
         try:
             if interaction.type != discord.InteractionType.component:
                 return
@@ -1020,6 +1140,7 @@ class ConfessionsBot(discord.Client):
                 return
 
             if custom_id.startswith("nc|"):
+                action = "new confession"
                 parts = custom_id.split("|")
                 if len(parts) != 2 or not parts[1].isdigit():
                     await self._safe_ephemeral(interaction, "Invalid confession button.")
@@ -1032,12 +1153,15 @@ class ConfessionsBot(discord.Client):
                     self,
                     GuildConfig(guild_id=interaction.guild.id, dest_channel_id=0, log_channel_id=0),
                 )
+                if interaction.response.is_done():
+                    return
                 await interaction.response.send_modal(modal)
                 return
 
             # Accept new static reply button id and legacy signed ids.
             if custom_id != "cr" and not custom_id.startswith("cr|"):
                 return
+            action = "anonymous reply"
             if not interaction.guild:
                 await self._safe_ephemeral(interaction, "Invalid reply target.")
                 return
@@ -1076,11 +1200,48 @@ class ConfessionsBot(discord.Client):
                 parent_channel_id=target_channel.id,
                 parent_message_id=target_msg.id,
             )
+            if interaction.response.is_done():
+                return
             await interaction.response.send_modal(modal)
 
+        except discord.Forbidden:
+            log.exception(
+                "Missing access while handling %s (custom_id=%r guild_id=%r user_id=%r)",
+                action,
+                custom_id,
+                interaction.guild.id if interaction.guild else None,
+                interaction.user.id if interaction.user else None,
+            )
+            await self._safe_ephemeral(interaction, "I don't have enough access to handle that action.")
+        except discord.HTTPException as exc:
+            if exc.code in (40060, 10062):
+                log.debug(
+                    "Stale interaction while handling %s (custom_id=%r guild_id=%r user_id=%r code=%r)",
+                    action,
+                    custom_id,
+                    interaction.guild.id if interaction.guild else None,
+                    interaction.user.id if interaction.user else None,
+                    exc.code,
+                )
+                return
+            log.exception(
+                "Discord HTTP error while handling %s (custom_id=%r guild_id=%r user_id=%r)",
+                action,
+                custom_id,
+                interaction.guild.id if interaction.guild else None,
+                interaction.user.id if interaction.user else None,
+            )
+            await self._safe_ephemeral(interaction, "Discord rejected that interaction. Please try again.")
         except Exception:
+            log.exception(
+                "Unexpected error while handling %s (custom_id=%r guild_id=%r user_id=%r)",
+                action,
+                custom_id,
+                interaction.guild.id if interaction.guild else None,
+                interaction.user.id if interaction.user else None,
+            )
             try:
-                await self._safe_ephemeral(interaction, "Something went wrong handling that reply.")
+                await self._safe_ephemeral(interaction, f"Something went wrong handling that {action}.")
             except Exception:
                 pass
 
