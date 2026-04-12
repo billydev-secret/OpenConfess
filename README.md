@@ -44,7 +44,6 @@ Requires `Manage Server` or `Administrator`.
 - `/confession set-log` - Set where private moderation logs are posted.
 - `/confession cooldown` - Set per-user cooldown between posts (seconds).
 - `/confession maxchars` - Set max characters for confessions and replies.
-- `/confession maxattachments` - Set max attachments allowed per confession.
 - `/confession panic` - Enable or disable panic mode (pauses confessions/replies).
 - `/confession replies` - Enable or disable anonymous replies.
 - `/confession ping-op` - DM original posters when new anonymous replies are posted.

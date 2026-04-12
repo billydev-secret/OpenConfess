@@ -1,0 +1,8 @@
+# Discord Bot Dependencies
+discord.py==2.4.0
+python-dotenv==1.0.1
+
+# Development Dependencies (optional)
+# mypy==1.8.0
+# pytest==7.4.3
+# pytest-asyncio==0.23.2
