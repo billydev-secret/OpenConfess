@@ -508,7 +508,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         style=discord.TextStyle.long,
         required=True,
         max_length=4000,
-        placeholder="Confessions are logged by admin for rules\nAir moderation grievances in tickets\nBe kind when mentioning people",
+        placeholder="Confessions are logged by admins\nGrievances belong in tickets\nBe kind when mentioning people",
     )
     notify_pref = discord.ui.TextInput(
         label="Notify me on replies? (yes/no)",
