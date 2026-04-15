@@ -10,6 +10,7 @@ Env:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -64,6 +65,16 @@ def defang_everyone_here(text: str) -> str:
 
 def jump_link(guild_id: int, channel_id: int, message_id: int) -> str:
     return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+
+def anon_id(user_id: int, root_message_id: int) -> str:
+    """Stable 4-char hex ID for a user within one confession thread.
+
+    Same user always gets the same tag in the same thread, but a
+    different tag in every other thread — no cross-thread correlation.
+    """
+    digest = hashlib.sha256(f"{user_id}:{root_message_id}".encode()).hexdigest()
+    return digest[:4].upper()
 
 
 # ── Data layer ────────────────────────────────────────────────────────────────
@@ -728,6 +739,13 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             if parent_notify_pref not in (0, 1):
                 parent_notify_pref = 1 if cfg.notify_op_on_reply else 0
 
+        # Build the anonymous prefix for this reply
+        if parent_author_id > 0 and interaction.user.id == parent_author_id:
+            reply_prefix = "[OP] "
+        else:
+            reply_prefix = f"[Anon-{anon_id(interaction.user.id, root_message_id)}] "
+        reply_content = (reply_prefix + defang_everyone_here(content))[:MAX_DISCORD_MESSAGE_LENGTH]
+
         if self.thread_id:
             # Thread-based reply: post into the Discord Thread
             reply_channel: discord.Thread | discord.TextChannel | None = self.bot.get_channel(self.thread_id)  # type: ignore[assignment]
@@ -743,7 +761,7 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
 
             try:
                 reply_msg = await reply_channel.send(
-                    content=defang_everyone_here(content),
+                    content=reply_content,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             except discord.HTTPException:
@@ -817,7 +835,7 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
 
         try:
             reply_msg = await dest_channel.send(
-                content=defang_everyone_here(content),
+                content=reply_content,
                 reference=parent_msg,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
