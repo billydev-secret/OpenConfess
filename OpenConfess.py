@@ -876,6 +876,7 @@ class ConfessionsBot(commands.Bot):
         super().__init__(command_prefix=[], intents=intents)
         self.store = store
         self._launcher_locks: dict[int, asyncio.Lock] = {}
+        self._pending_forum_threads: set[int] = set()  # thread IDs awaiting their first message
 
     async def setup_hook(self) -> None:
         await self.add_cog(ConfessionsCog(self))
@@ -1033,18 +1034,28 @@ class ConfessionsBot(commands.Bot):
             for child in row.children
         )
 
+    async def on_thread_create(self, thread: discord.Thread) -> None:
+        """Mark forum threads for anonymisation when their first message arrives."""
+        if not thread.guild or not self.user or thread.owner_id == self.user.id:
+            return
+        # parent_id check is cheaper than isinstance when parent may not be cached
+        cfg = self.store.get_config(thread.guild.id)
+        if not cfg or thread.parent_id != cfg.dest_channel_id:
+            return
+        if not isinstance(thread.parent, discord.ForumChannel):
+            return
+        self._pending_forum_threads.add(thread.id)
+
     async def on_message(self, message: discord.Message) -> None:
         if not message.guild or not self.user or message.author.bot:
             return
 
-        # Detect native forum starter messages (message.id == thread.id for forum openers)
-        if (
-            isinstance(message.channel, discord.Thread)
-            and isinstance(message.channel.parent, discord.ForumChannel)
-            and message.id == message.channel.id
-        ):
-            await self._anonymize_native_forum_post(message)
-            return
+        # First message in a tracked forum thread → anonymise it
+        if message.channel.id in self._pending_forum_threads:
+            self._pending_forum_threads.discard(message.channel.id)
+            if isinstance(message.channel, discord.Thread):
+                await self._anonymize_native_forum_post(message)
+                return
 
         cfg = self.store.get_config(message.guild.id)
         if (
