@@ -1093,10 +1093,17 @@ class ConfessionsBot(commands.Bot):
 
     async def _anonymize_native_forum_post(self, message: discord.Message) -> None:
         """Delete a native forum post and repost it as an anonymous confession."""
-        assert message.guild and isinstance(message.channel, discord.Thread)
+        if not message.guild or not isinstance(message.channel, discord.Thread):
+            return
         thread = message.channel
         forum_channel = thread.parent
-        assert isinstance(forum_channel, discord.ForumChannel)
+        if forum_channel is None:
+            try:
+                forum_channel = await message.guild.fetch_channel(thread.parent_id)
+            except discord.HTTPException:
+                return
+        if not isinstance(forum_channel, discord.ForumChannel):
+            return
 
         cfg = self.store.get_config(message.guild.id)
         if not cfg or forum_channel.id != cfg.dest_channel_id:
