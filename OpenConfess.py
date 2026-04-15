@@ -1043,10 +1043,24 @@ class ConfessionsBot(commands.Bot):
 
     async def on_thread_create(self, thread: discord.Thread) -> None:
         """Intercept native forum posts and repost them anonymously."""
+        log.info(
+            "on_thread_create fired: thread=%r parent=%r owner=%r guild=%r bot=%r",
+            thread.id, thread.parent_id, thread.owner_id,
+            thread.guild.id if thread.guild else None,
+            self.user.id if self.user else None,
+        )
         if not thread.guild or not self.user or thread.owner_id == self.user.id:
+            log.info("on_thread_create: skip — own thread or missing guild/user")
             return
         cfg = self.store.get_config(thread.guild.id)
-        if not cfg or thread.parent_id != cfg.dest_channel_id:
+        if not cfg:
+            log.info("on_thread_create: skip — no config for guild=%r", thread.guild.id)
+            return
+        if thread.parent_id != cfg.dest_channel_id:
+            log.info(
+                "on_thread_create: skip — wrong channel (parent=%r dest=%r)",
+                thread.parent_id, cfg.dest_channel_id,
+            )
             return
         # thread.parent is often None at fire time; look up via bot cache instead
         parent = self.get_channel(thread.parent_id)
@@ -1054,11 +1068,15 @@ class ConfessionsBot(commands.Bot):
             try:
                 parent = await thread.guild.fetch_channel(thread.parent_id)
             except discord.HTTPException:
+                log.warning("on_thread_create: failed to fetch parent channel %r", thread.parent_id)
                 return
         if not isinstance(parent, discord.ForumChannel):
+            log.info("on_thread_create: skip — parent is not a ForumChannel (type=%r)", type(parent).__name__)
             return
         if thread.id in self._processing_forum_threads:
+            log.info("on_thread_create: skip — already processing thread=%r", thread.id)
             return
+        log.info("on_thread_create: scheduling anonymization for thread=%r", thread.id)
         self._processing_forum_threads.add(thread.id)
         asyncio.create_task(self._fetch_and_anonymize_forum_post(thread))
 
@@ -1126,7 +1144,13 @@ class ConfessionsBot(commands.Bot):
         author = message.author
         content = message.content.strip()
 
+        log.info(
+            "_anonymize_native_forum_post: guild=%r author=%r thread=%r content_len=%d",
+            message.guild.id, author.id, thread.id, len(content),
+        )
+
         if cfg.panic:
+            log.info("_anonymize_native_forum_post: panic mode — deleting thread=%r", thread.id)
             try:
                 await thread.delete()
             except discord.HTTPException:
@@ -1134,6 +1158,7 @@ class ConfessionsBot(commands.Bot):
             return
 
         if author.id in cfg.blocked_set():
+            log.info("_anonymize_native_forum_post: blocked user=%r — deleting thread=%r", author.id, thread.id)
             try:
                 await thread.delete()
             except discord.HTTPException:
@@ -1142,6 +1167,10 @@ class ConfessionsBot(commands.Bot):
 
         max_chars = min(cfg.max_chars, MAX_DISCORD_MESSAGE_LENGTH)
         if not content or len(content) > max_chars:
+            log.info(
+                "_anonymize_native_forum_post: skip — empty or too long (len=%d max=%d)",
+                len(content), max_chars,
+            )
             return  # leave untouched; can't repost something we can't represent
 
         # Check rate limits before deleting so we don't lose the post
@@ -1150,6 +1179,7 @@ class ConfessionsBot(commands.Bot):
             is_reply=False, cooldown_seconds=cfg.cooldown_seconds, per_day_limit=cfg.per_day_limit,
         )
         if not ok:
+            log.info("_anonymize_native_forum_post: rate-limited user=%r — deleting thread=%r", author.id, thread.id)
             try:
                 await thread.delete()
                 await author.send(
@@ -1163,13 +1193,20 @@ class ConfessionsBot(commands.Bot):
 
         log_channel = message.guild.get_channel(cfg.log_channel_id)
         if not isinstance(log_channel, discord.TextChannel):
+            log.warning("_anonymize_native_forum_post: log channel missing or wrong type for guild=%r", message.guild.id)
             return
 
+        log.info("_anonymize_native_forum_post: deleting original thread=%r", thread.id)
         try:
             await thread.delete()
         except discord.Forbidden:
+            log.warning(
+                "_anonymize_native_forum_post: missing Manage Threads permission — cannot delete thread=%r in guild=%r",
+                thread.id, message.guild.id,
+            )
             return  # no Manage Threads permission; can't anonymize
-        except discord.HTTPException:
+        except discord.HTTPException as exc:
+            log.warning("_anonymize_native_forum_post: failed to delete thread=%r (code=%r)", thread.id, exc.code)
             return
 
         try:
