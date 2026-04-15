@@ -77,6 +77,49 @@ def anon_id(user_id: int, root_message_id: int) -> str:
     return digest[:4].upper()
 
 
+# ANSI foreground colors that look good on Discord's dark theme
+_ANON_COLORS = [
+    "\u001b[31m",   # red
+    "\u001b[32m",   # green
+    "\u001b[33m",   # yellow
+    "\u001b[34m",   # blue
+    "\u001b[35m",   # magenta
+    "\u001b[36m",   # cyan
+    "\u001b[91m",   # bright red
+    "\u001b[92m",   # bright green
+    "\u001b[93m",   # bright yellow
+    "\u001b[94m",   # bright indigo
+    "\u001b[95m",   # bright magenta
+    "\u001b[96m",   # bright cyan
+]
+_ANSI_RESET = "\u001b[0m"
+_OP_COLOR   = "\u001b[1;33m"   # bold yellow — distinct from anon colors
+
+
+def anon_color(user_id: int, root_message_id: int) -> str:
+    """Consistent ANSI foreground color for a user within a thread."""
+    digest = hashlib.sha256(f"c:{user_id}:{root_message_id}".encode()).digest()
+    return _ANON_COLORS[int.from_bytes(digest[:2], "big") % len(_ANON_COLORS)]
+
+
+def build_anon_reply(content: str, user_id: int, root_message_id: int, *, is_op: bool) -> str:
+    """Return a Discord ANSI code-block message with a colored anon prefix."""
+    safe = defang_everyone_here(content)
+    if is_op:
+        colored_tag = f"{_OP_COLOR}[OP]{_ANSI_RESET}"
+    else:
+        color = anon_color(user_id, root_message_id)
+        tag   = anon_id(user_id, root_message_id)
+        colored_tag = f"{color}[Anon-{tag}]{_ANSI_RESET}"
+    body = f"{colored_tag} {safe}"
+    msg  = f"```ansi\n{body}\n```"
+    if len(msg) > MAX_DISCORD_MESSAGE_LENGTH:
+        overhead = len(msg) - len(safe)
+        body = f"{colored_tag} {safe[:MAX_DISCORD_MESSAGE_LENGTH - overhead]}"
+        msg  = f"```ansi\n{body}\n```"
+    return msg
+
+
 # ── Data layer ────────────────────────────────────────────────────────────────
 @dataclass
 class GuildConfig:
@@ -739,12 +782,11 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             if parent_notify_pref not in (0, 1):
                 parent_notify_pref = 1 if cfg.notify_op_on_reply else 0
 
-        # Build the anonymous prefix for this reply
-        if parent_author_id > 0 and interaction.user.id == parent_author_id:
-            reply_prefix = "[OP] "
-        else:
-            reply_prefix = f"[Anon-{anon_id(interaction.user.id, root_message_id)}] "
-        reply_content = (reply_prefix + defang_everyone_here(content))[:MAX_DISCORD_MESSAGE_LENGTH]
+        # Build the colored anonymous reply
+        is_op = parent_author_id > 0 and interaction.user.id == parent_author_id
+        reply_content = build_anon_reply(
+            content, interaction.user.id, root_message_id, is_op=is_op
+        )
 
         if self.thread_id:
             # Thread-based reply: post into the Discord Thread
@@ -901,6 +943,7 @@ class ConfessionsBot(commands.Bot):
         super().__init__(command_prefix=[], intents=intents)
         self.store = store
         self._launcher_locks: dict[int, asyncio.Lock] = {}
+        self._reply_button_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
     async def setup_hook(self) -> None:
         await self.add_cog(ConfessionsCog(self))
@@ -922,6 +965,12 @@ class ConfessionsBot(commands.Bot):
         if guild_id not in self._launcher_locks:
             self._launcher_locks[guild_id] = asyncio.Lock()
         return self._launcher_locks[guild_id]
+
+    def _get_reply_button_lock(self, guild_id: int, root_message_id: int) -> asyncio.Lock:
+        key = (guild_id, root_message_id)
+        if key not in self._reply_button_locks:
+            self._reply_button_locks[key] = asyncio.Lock()
+        return self._reply_button_locks[key]
 
     @staticmethod
     def _message_has_confess_launcher(message: discord.Message, guild_id: int) -> bool:
