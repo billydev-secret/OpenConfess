@@ -1046,6 +1046,119 @@ class ConfessionsBot(commands.Bot):
             await self.refresh_confess_launcher(message.guild.id, trigger_channel_id=message.channel.id)
         await self.process_commands(message)
 
+    async def on_thread_create(self, thread: discord.Thread) -> None:
+        """Convert native forum posts into anonymous confessions."""
+        if not thread.guild or not self.user or thread.owner_id == self.user.id:
+            return
+        if not isinstance(thread.parent, discord.ForumChannel):
+            return
+
+        cfg = self.store.get_config(thread.guild.id)
+        if not cfg or thread.parent_id != cfg.dest_channel_id:
+            return
+
+        # Fetch the starter message (REST fetch is reliable even without message_content intent)
+        await asyncio.sleep(0.5)  # brief pause to ensure the message is persisted
+        try:
+            starter_msg = await thread.fetch_message(thread.id)
+        except discord.HTTPException:
+            return
+
+        author = starter_msg.author
+        content = starter_msg.content.strip()
+
+        # Validate: panic mode
+        if cfg.panic:
+            try:
+                await thread.delete()
+            except discord.HTTPException:
+                pass
+            return
+
+        # Validate: blocked users
+        if author.id in cfg.blocked_set():
+            try:
+                await thread.delete()
+            except discord.HTTPException:
+                pass
+            return
+
+        # Validate: content length
+        max_chars = min(cfg.max_chars, MAX_DISCORD_MESSAGE_LENGTH)
+        if not content or len(content) > max_chars:
+            return  # leave the post; don't silently delete something we can't repost
+
+        # Validate: rate limits — check before deleting so we don't lose the post
+        ok, cooldown_msg = self.store.check_and_bump_limits(
+            thread.guild.id, author.id,
+            is_reply=False, cooldown_seconds=cfg.cooldown_seconds, per_day_limit=cfg.per_day_limit,
+        )
+        if not ok:
+            try:
+                await thread.delete()
+                await author.send(
+                    f"Your confession in **{thread.guild.name}** was removed because {cooldown_msg.lower()}\n"
+                    "Please try again later.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                pass
+            return
+
+        log_channel = thread.guild.get_channel(cfg.log_channel_id)
+        if not isinstance(log_channel, discord.TextChannel):
+            return
+
+        # Delete the native (non-anonymous) post
+        try:
+            await thread.delete()
+        except discord.Forbidden:
+            return  # no permission to delete; can't anonymize
+        except discord.HTTPException:
+            return
+
+        # Repost as anonymous forum thread
+        forum_channel = thread.parent
+        try:
+            forum_result = await forum_channel.create_thread(
+                name="Anonymous Confession",
+                content=defang_everyone_here(content),
+                allowed_mentions=discord.AllowedMentions.none(),
+                auto_archive_duration=10080,
+            )
+        except discord.HTTPException:
+            log.exception("Failed to repost native forum post as anonymous (guild=%r)", thread.guild.id)
+            return
+
+        anon_thread = forum_result.thread
+        root_message_id = anon_thread.id
+
+        await log_confession(
+            log_channel=log_channel,
+            author=author,
+            guild_id=thread.guild.id,
+            dest_channel_id=anon_thread.id,
+            dest_message_id=anon_thread.id,
+            content=content,
+        )
+        self.store.upsert_thread_post(
+            guild_id=thread.guild.id,
+            message_id=root_message_id,
+            channel_id=forum_channel.id,
+            root_message_id=root_message_id,
+            original_author_id=author.id,
+            notify_original_author=1,
+        )
+        self.store.update_discord_thread_id(thread.guild.id, root_message_id, anon_thread.id)
+        try:
+            button_msg = await anon_thread.send(
+                view=self.build_reply_button_view(root_message_id),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            self.store.update_reply_button_message_id(thread.guild.id, root_message_id, button_msg.id)
+        except discord.HTTPException:
+            pass
+
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         custom_id: Optional[str] = None
         action = "interaction"
