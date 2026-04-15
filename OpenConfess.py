@@ -724,13 +724,14 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             except discord.HTTPException:
                 pass
 
-            if parent_notify_pref == 1 and parent_author_id > 0 and parent_author_id != interaction.user.id:
+            if parent_author_id > 0 and parent_author_id != interaction.user.id:
                 await self.bot.notify_original_poster(
                     guild=interaction.guild,
                     original_author_id=parent_author_id,
                     reply_channel_id=reply_channel.id,
                     reply_message_id=reply_msg.id,
                     root_message_id=root_message_id,
+                    confession_channel_id=reply_channel.parent_id or cfg.dest_channel_id,
                 )
 
             parent_channel_id = reply_channel.parent_id or cfg.dest_channel_id
@@ -797,7 +798,7 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
         except discord.HTTPException:
             pass
 
-        if parent_notify_pref == 1 and parent_author_id > 0 and parent_author_id != interaction.user.id:
+        if parent_author_id > 0 and parent_author_id != interaction.user.id:
             await self.bot.notify_original_poster(
                 guild=interaction.guild,
                 original_author_id=parent_author_id,
@@ -952,6 +953,7 @@ class ConfessionsBot(commands.Bot):
         reply_channel_id: int,
         reply_message_id: int,
         root_message_id: int,
+        confession_channel_id: Optional[int] = None,
     ) -> None:
         user: Optional[discord.abc.User] = guild.get_member(original_author_id)
         if user is None:
@@ -961,10 +963,11 @@ class ConfessionsBot(commands.Bot):
                 return
         if user is None:
             return
+        confession_ch = confession_channel_id or reply_channel_id
         text = (
             f"Someone replied to your anonymous confession in **{guild.name}**.\n"
             f"Reply: {jump_link(guild.id, reply_channel_id, reply_message_id)}\n"
-            f"Confession: {jump_link(guild.id, reply_channel_id, root_message_id)}"
+            f"Confession: {jump_link(guild.id, confession_ch, root_message_id)}"
         )
         try:
             await user.send(text, allowed_mentions=discord.AllowedMentions.none())
