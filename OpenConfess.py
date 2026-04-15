@@ -1038,11 +1038,17 @@ class ConfessionsBot(commands.Bot):
         """Mark forum threads for anonymisation when their first message arrives."""
         if not thread.guild or not self.user or thread.owner_id == self.user.id:
             return
-        # parent_id check is cheaper than isinstance when parent may not be cached
         cfg = self.store.get_config(thread.guild.id)
         if not cfg or thread.parent_id != cfg.dest_channel_id:
             return
-        if not isinstance(thread.parent, discord.ForumChannel):
+        # thread.parent is often None at fire time; look up via bot cache instead
+        parent = self.get_channel(thread.parent_id)
+        if parent is None:
+            try:
+                parent = await thread.guild.fetch_channel(thread.parent_id)
+            except discord.HTTPException:
+                return
+        if not isinstance(parent, discord.ForumChannel):
             return
         self._pending_forum_threads.add(thread.id)
 
