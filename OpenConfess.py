@@ -883,7 +883,7 @@ class ConfessionsBot(commands.Bot):
         super().__init__(command_prefix=[], intents=intents)
         self.store = store
         self._launcher_locks: dict[int, asyncio.Lock] = {}
-        self._pending_forum_threads: set[int] = set()  # thread IDs awaiting their first message
+        self._processing_forum_threads: set[int] = set()  # thread IDs currently being anonymized
 
     async def setup_hook(self) -> None:
         await self.add_cog(ConfessionsCog(self))
@@ -1057,28 +1057,42 @@ class ConfessionsBot(commands.Bot):
                 return
         if not isinstance(parent, discord.ForumChannel):
             return
-        # on_message does NOT reliably fire for forum post starter messages —
-        # they are delivered inside the THREAD_CREATE payload, not a separate
-        # MESSAGE_CREATE event. Fetch the starter message directly instead.
-        # For forum posts the starter message ID always equals the thread ID.
-        try:
-            starter_msg = await thread.fetch_message(thread.id)
-        except discord.HTTPException:
-            # Couldn't fetch yet — fall back to on_message when it arrives
-            self._pending_forum_threads.add(thread.id)
+        if thread.id in self._processing_forum_threads:
             return
-        await self._anonymize_native_forum_post(starter_msg)
+        self._processing_forum_threads.add(thread.id)
+        asyncio.create_task(self._fetch_and_anonymize_forum_post(thread))
+
+    async def _fetch_and_anonymize_forum_post(self, thread: discord.Thread) -> None:
+        """Fetch the forum starter message (with retries) then anonymize it.
+
+        The starter message often isn't available immediately when THREAD_CREATE
+        fires, so we retry with increasing back-off before giving up.
+        """
+        try:
+            for delay in (0, 1, 3, 5):
+                if delay:
+                    await asyncio.sleep(delay)
+                try:
+                    starter_msg = await thread.fetch_message(thread.id)
+                except discord.NotFound:
+                    continue  # not ready yet — try again
+                except discord.HTTPException:
+                    log.warning(
+                        "Forum post fetch failed (non-404) for thread=%r; giving up", thread.id
+                    )
+                    return
+                log.info(
+                    "Forum post fetched for thread=%r after delay=%rs; anonymizing", thread.id, delay
+                )
+                await self._anonymize_native_forum_post(starter_msg)
+                return
+            log.warning("Forum post anonymization timed out for thread=%r", thread.id)
+        finally:
+            self._processing_forum_threads.discard(thread.id)
 
     async def on_message(self, message: discord.Message) -> None:
         if not message.guild or not self.user or message.author.bot:
             return
-
-        # First message in a tracked forum thread → anonymise it
-        if message.channel.id in self._pending_forum_threads:
-            self._pending_forum_threads.discard(message.channel.id)
-            if isinstance(message.channel, discord.Thread):
-                await self._anonymize_native_forum_post(message)
-                return
 
         cfg = self.store.get_config(message.guild.id)
         if (
