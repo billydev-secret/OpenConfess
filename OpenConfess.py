@@ -16,7 +16,7 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 import discord
 from discord import app_commands
@@ -527,7 +527,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
 
         dest_channel = interaction.guild.get_channel(cfg.dest_channel_id)
         log_channel = interaction.guild.get_channel(cfg.log_channel_id)
-        if not isinstance(dest_channel, discord.TextChannel) or not isinstance(log_channel, discord.TextChannel):
+        if not isinstance(dest_channel, (discord.TextChannel, discord.ForumChannel)) or not isinstance(log_channel, discord.TextChannel):
             await self.bot._safe_ephemeral(interaction, "Bot config is invalid (missing destination or log channel).")
             return
 
@@ -536,6 +536,51 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         except discord.HTTPException:
             return
 
+        if isinstance(dest_channel, discord.ForumChannel):
+            # Forum path: create_thread posts the confession as the forum post opener
+            try:
+                forum_result = await dest_channel.create_thread(
+                    name="Anonymous Confession",
+                    content=defang_everyone_here(content),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    auto_archive_duration=10080,
+                )
+            except discord.HTTPException:
+                await self.bot._safe_ephemeral(interaction, "Failed to post confession (missing perms?).")
+                return
+            forum_thread = forum_result.thread
+            # In Discord forum posts, the thread ID equals the starter message ID
+            root_message_id = forum_thread.id
+            await log_confession(
+                log_channel=log_channel,
+                author=interaction.user,
+                guild_id=interaction.guild.id,
+                dest_channel_id=forum_thread.id,
+                dest_message_id=forum_thread.id,
+                content=content,
+            )
+            self.bot.store.upsert_thread_post(
+                guild_id=interaction.guild.id,
+                message_id=root_message_id,
+                channel_id=dest_channel.id,
+                root_message_id=root_message_id,
+                original_author_id=interaction.user.id,
+                notify_original_author=1 if ping_pref else 0,
+            )
+            self.bot.store.update_discord_thread_id(interaction.guild.id, root_message_id, forum_thread.id)
+            try:
+                button_msg = await forum_thread.send(
+                    view=self.bot.build_reply_button_view(root_message_id),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                self.bot.store.update_reply_button_message_id(interaction.guild.id, root_message_id, button_msg.id)
+            except discord.HTTPException:
+                pass
+            await self.bot.refresh_confess_launcher(interaction.guild.id, trigger_channel_id=dest_channel.id)
+            await self.bot._safe_complete(interaction)
+            return
+
+        # Text channel path: post confession, then create a thread from it
         try:
             sent = await dest_channel.send(
                 content=defang_everyone_here(content),
@@ -1217,9 +1262,9 @@ class AdminCog(commands.Cog, name="Admin"):
         )
         await interaction.response.send_message(msg, ephemeral=True)
 
-    @confession.command(name="set-dest", description="Set where anonymous confessions are posted.")
-    @app_commands.describe(channel="Destination channel")
-    async def set_dest(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+    @confession.command(name="set-dest", description="Set where anonymous confessions are posted (text or forum channel).")
+    @app_commands.describe(channel="Destination channel (text or forum)")
+    async def set_dest(self, interaction: discord.Interaction, channel: Union[discord.TextChannel, discord.ForumChannel]) -> None:
         assert interaction.guild
         cfg = self._get_or_create_cfg(interaction.guild.id, channel.id)
         cfg.dest_channel_id = channel.id
