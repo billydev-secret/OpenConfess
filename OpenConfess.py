@@ -77,46 +77,33 @@ def anon_id(user_id: int, root_message_id: int) -> str:
     return digest[:4].upper()
 
 
-# ANSI foreground colors that look good on Discord's dark theme
-_ANON_COLORS = [
-    "\u001b[31m",   # red
-    "\u001b[32m",   # green
-    "\u001b[33m",   # yellow
-    "\u001b[34m",   # blue
-    "\u001b[35m",   # magenta
-    "\u001b[36m",   # cyan
-    "\u001b[91m",   # bright red
-    "\u001b[92m",   # bright green
-    "\u001b[93m",   # bright yellow
-    "\u001b[94m",   # bright indigo
-    "\u001b[95m",   # bright magenta
-    "\u001b[96m",   # bright cyan
+# Colored shape emojis — widely supported (Unicode 12.0+), render on all platforms
+_ANON_CIRCLES = [
+    "🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "🟤", "⚫", "⚪",  # circles
+    "🟥", "🟧", "🟨", "🟩", "🟦", "🟪", "🟫", "⬛", "⬜",  # large squares
+    "🔶", "🔷", "🔸", "🔹",                                  # diamonds
 ]
-_ANSI_RESET = "\u001b[0m"
-_OP_COLOR   = "\u001b[1;33m"   # bold yellow — distinct from anon colors
+_OP_CIRCLE    = "⭐"
 
 
-def anon_color(user_id: int, root_message_id: int) -> str:
-    """Consistent ANSI foreground color for a user within a thread."""
+def anon_circle(user_id: int, root_message_id: int) -> str:
+    """Consistent colored shape emoji for a user within a thread."""
     digest = hashlib.sha256(f"c:{user_id}:{root_message_id}".encode()).digest()
-    return _ANON_COLORS[int.from_bytes(digest[:2], "big") % len(_ANON_COLORS)]
+    return _ANON_CIRCLES[int.from_bytes(digest[:2], "big") % len(_ANON_CIRCLES)]
 
 
 def build_anon_reply(content: str, user_id: int, root_message_id: int, *, is_op: bool) -> str:
-    """Return a Discord ANSI code-block message with a colored anon prefix."""
+    """Return a plain-text message with a colored shape + anon ID on the first line, content on the second."""
     safe = defang_everyone_here(content)
     if is_op:
-        colored_tag = f"{_OP_COLOR}[OP]{_ANSI_RESET}"
+        prefix = f"{_OP_CIRCLE} [OP]"
     else:
-        color = anon_color(user_id, root_message_id)
-        tag   = anon_id(user_id, root_message_id)
-        colored_tag = f"{color}[Anon-{tag}]{_ANSI_RESET}"
-    body = f"{colored_tag} {safe}"
-    msg  = f"```ansi\n{body}\n```"
+        circle = anon_circle(user_id, root_message_id)
+        tag    = anon_id(user_id, root_message_id)
+        prefix = f"{circle} [{tag}]"
+    msg = f"{prefix}\n{safe}"
     if len(msg) > MAX_DISCORD_MESSAGE_LENGTH:
-        overhead = len(msg) - len(safe)
-        body = f"{colored_tag} {safe[:MAX_DISCORD_MESSAGE_LENGTH - overhead]}"
-        msg  = f"```ansi\n{body}\n```"
+        msg = f"{prefix}\n{safe[:MAX_DISCORD_MESSAGE_LENGTH - len(prefix) - 1]}"
     return msg
 
 
@@ -521,7 +508,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         style=discord.TextStyle.long,
         required=True,
         max_length=4000,
-        placeholder="Say it plainly. No names if you can help it.",
+        placeholder="Confessions are logged by admin for rules\nAir moderation grievances in tickets\nBe kind when mentioning people",
     )
     notify_pref = discord.ui.TextInput(
         label="Notify me on replies? (yes/no)",
@@ -895,20 +882,21 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             notify_original_author=my_notify_pref,
         )
 
-        old_btn_id = self.bot.store.get_reply_button_message_id(interaction.guild.id, root_message_id)
-        if old_btn_id:
+        async with self.bot._get_reply_button_lock(interaction.guild.id, root_message_id):
+            old_btn_id = self.bot.store.get_reply_button_message_id(interaction.guild.id, root_message_id)
+            if old_btn_id:
+                try:
+                    await dest_channel.get_partial_message(old_btn_id).delete()
+                except discord.HTTPException:
+                    pass
             try:
-                await dest_channel.get_partial_message(old_btn_id).delete()
+                button_msg = await dest_channel.send(
+                    view=self.bot.build_reply_button_view(root_message_id),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                self.bot.store.update_reply_button_message_id(interaction.guild.id, root_message_id, button_msg.id)
             except discord.HTTPException:
                 pass
-        try:
-            button_msg = await dest_channel.send(
-                view=self.bot.build_reply_button_view(root_message_id),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            self.bot.store.update_reply_button_message_id(interaction.guild.id, root_message_id, button_msg.id)
-        except discord.HTTPException:
-            pass
 
         if parent_author_id > 0 and parent_author_id != interaction.user.id:
             await self.bot.notify_original_poster(
