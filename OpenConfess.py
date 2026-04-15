@@ -819,20 +819,21 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
                 notify_original_author=my_notify_pref,
             )
 
-            old_btn_id = self.bot.store.get_reply_button_message_id(interaction.guild.id, root_message_id)
-            if old_btn_id:
+            async with self.bot._get_reply_button_lock(interaction.guild.id, root_message_id):
+                old_btn_id = self.bot.store.get_reply_button_message_id(interaction.guild.id, root_message_id)
+                if old_btn_id:
+                    try:
+                        await reply_channel.get_partial_message(old_btn_id).delete()
+                    except discord.HTTPException:
+                        pass
                 try:
-                    await reply_channel.get_partial_message(old_btn_id).delete()
+                    button_msg = await reply_channel.send(
+                        view=self.bot.build_reply_button_view(root_message_id),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    self.bot.store.update_reply_button_message_id(interaction.guild.id, root_message_id, button_msg.id)
                 except discord.HTTPException:
                     pass
-            try:
-                button_msg = await reply_channel.send(
-                    view=self.bot.build_reply_button_view(root_message_id),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                self.bot.store.update_reply_button_message_id(interaction.guild.id, root_message_id, button_msg.id)
-            except discord.HTTPException:
-                pass
 
             if parent_author_id > 0 and parent_author_id != interaction.user.id:
                 await self.bot.notify_original_poster(
