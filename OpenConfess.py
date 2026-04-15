@@ -1042,7 +1042,7 @@ class ConfessionsBot(commands.Bot):
         )
 
     async def on_thread_create(self, thread: discord.Thread) -> None:
-        """Mark forum threads for anonymisation when their first message arrives."""
+        """Intercept native forum posts and repost them anonymously."""
         if not thread.guild or not self.user or thread.owner_id == self.user.id:
             return
         cfg = self.store.get_config(thread.guild.id)
@@ -1057,7 +1057,17 @@ class ConfessionsBot(commands.Bot):
                 return
         if not isinstance(parent, discord.ForumChannel):
             return
-        self._pending_forum_threads.add(thread.id)
+        # on_message does NOT reliably fire for forum post starter messages —
+        # they are delivered inside the THREAD_CREATE payload, not a separate
+        # MESSAGE_CREATE event. Fetch the starter message directly instead.
+        # For forum posts the starter message ID always equals the thread ID.
+        try:
+            starter_msg = await thread.fetch_message(thread.id)
+        except discord.HTTPException:
+            # Couldn't fetch yet — fall back to on_message when it arrives
+            self._pending_forum_threads.add(thread.id)
+            return
+        await self._anonymize_native_forum_post(starter_msg)
 
     async def on_message(self, message: discord.Message) -> None:
         if not message.guild or not self.user or message.author.bot:
