@@ -580,13 +580,19 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             return
 
         if isinstance(dest_channel, discord.ForumChannel):
-            # Forum path: create_thread posts the confession as the forum post opener
+            # Forum path: create_thread posts the confession as the forum post opener.
+            # If the forum has "Require tag" enabled we must supply at least one tag or
+            # Discord returns 400 "Invalid Form Body".
+            tag_kwargs: dict = {}
+            if dest_channel.flags.require_tag and dest_channel.available_tags:
+                tag_kwargs["applied_tags"] = [dest_channel.available_tags[0]]
             try:
                 forum_result = await dest_channel.create_thread(
                     name="Anonymous Confession",
                     content=defang_everyone_here(content),
                     allowed_mentions=discord.AllowedMentions.none(),
                     auto_archive_duration=10080,
+                    **tag_kwargs,
                 )
             except discord.HTTPException:
                 await self.bot._safe_ephemeral(interaction, "Failed to post confession (missing perms?).")
