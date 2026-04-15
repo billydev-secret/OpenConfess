@@ -1041,6 +1041,10 @@ class ConfessionsBot(commands.Bot):
             for child in row.children
         )
 
+    async def on_socket_raw_receive(self, msg: str) -> None:
+        if "THREAD_CREATE" in str(msg):
+            log.info("RAW SOCKET: THREAD_CREATE payload received by bot")
+
     async def on_thread_create(self, thread: discord.Thread) -> None:
         """Intercept native forum posts and repost them anonymously."""
         log.info(
