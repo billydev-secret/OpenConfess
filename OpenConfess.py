@@ -457,6 +457,7 @@ class DMRequestModal(discord.ui.Modal, title="New DM Request"):
             await self.bot._safe_ephemeral(interaction, "Failed to submit DM request (missing perms?).")
             return
 
+        log.info("DM request submitted guild=%r user=%r", interaction.guild.id, interaction.user.id)
         await self.bot._safe_ephemeral(interaction, "Your DM request was sent to moderators.")
 
 
@@ -522,6 +523,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             is_reply=False, cooldown_seconds=cfg.cooldown_seconds, per_day_limit=cfg.per_day_limit,
         )
         if not ok:
+            log.info("Confession rate-limited guild=%r user=%r reason=%r", interaction.guild.id, interaction.user.id, msg)
             await self.bot._safe_ephemeral(interaction, msg)
             return
 
@@ -576,6 +578,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
                 self.bot.store.update_reply_button_message_id(interaction.guild.id, root_message_id, button_msg.id)
             except discord.HTTPException:
                 pass
+            log.info("Confession posted (forum) guild=%r user=%r thread=%r len=%d", interaction.guild.id, interaction.user.id, forum_thread.id, len(content))
             await self.bot.refresh_confess_launcher(interaction.guild.id, trigger_channel_id=dest_channel.id)
             await self.bot._safe_complete(interaction)
             return
@@ -622,6 +625,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
                 pass
         except discord.HTTPException:
             pass
+        log.info("Confession posted (text) guild=%r user=%r msg=%r len=%d", interaction.guild.id, interaction.user.id, sent.id, len(content))
         await self.bot.refresh_confess_launcher(interaction.guild.id, trigger_channel_id=dest_channel.id)
         await self.bot._safe_complete(interaction)
 
@@ -701,6 +705,7 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             is_reply=True, cooldown_seconds=reply_cooldown, per_day_limit=0,
         )
         if not ok:
+            log.info("Reply rate-limited guild=%r user=%r reason=%r", interaction.guild.id, interaction.user.id, msg)
             await self.bot._safe_ephemeral(interaction, msg)
             return
 
@@ -790,6 +795,7 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
                 reply_message_id=reply_msg.id,
                 content=content,
             )
+            log.info("Reply posted (thread) guild=%r user=%r thread=%r msg=%r len=%d", interaction.guild.id, interaction.user.id, reply_channel.id, reply_msg.id, len(content))
             await self.bot.refresh_confess_launcher(interaction.guild.id, trigger_channel_id=parent_channel_id)
             await self.bot._safe_complete(interaction)
             return
@@ -862,6 +868,7 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             reply_message_id=reply_msg.id,
             content=content,
         )
+        log.info("Reply posted (legacy text) guild=%r user=%r msg=%r len=%d", interaction.guild.id, interaction.user.id, reply_msg.id, len(content))
         await self.bot.refresh_confess_launcher(interaction.guild.id, trigger_channel_id=dest_channel.id)
         await self.bot._safe_complete(interaction)
 
@@ -1195,6 +1202,7 @@ class ConfessionsBot(commands.Bot):
                 if not interaction.guild or interaction.guild.id != int(parts[1]):
                     await self._safe_ephemeral(interaction, "Invalid confession button.")
                     return
+                log.info("Button click: Confess guild=%r user=%r", interaction.guild_id, interaction.user.id if interaction.user else None)
                 if not interaction.response.is_done():
                     await interaction.response.send_modal(ConfessModal(self))
                 return
@@ -1232,6 +1240,7 @@ class ConfessionsBot(commands.Bot):
                     await self._safe_ephemeral(interaction, "This confession can no longer be replied to.")
                     return
                 discord_thread_id = self.store.get_discord_thread_id(interaction.guild.id, root_message_id)
+                log.info("Button click: Anonymously Reply guild=%r user=%r root_msg=%r", interaction.guild_id, interaction.user.id if interaction.user else None, root_message_id)
                 if not interaction.response.is_done():
                     await interaction.response.send_modal(
                         ReplyModal(
@@ -1314,11 +1323,13 @@ class ConfessionsCog(commands.Cog, name="Confessions"):
     @app_commands.command(name="confess", description="Open the anonymous confession form.")
     @app_commands.guild_only()
     async def confess(self, interaction: discord.Interaction) -> None:
+        log.info("Slash /confess guild=%r user=%r", interaction.guild_id, interaction.user.id if interaction.user else None)
         await interaction.response.send_modal(ConfessModal(self.bot))
 
     @app_commands.command(name="dmrequest", description="Send moderators a private DM request.")
     @app_commands.guild_only()
     async def dmrequest(self, interaction: discord.Interaction) -> None:
+        log.info("Slash /dmrequest guild=%r user=%r", interaction.guild_id, interaction.user.id if interaction.user else None)
         await interaction.response.send_modal(DMRequestModal(self.bot))
 
 
