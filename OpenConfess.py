@@ -152,6 +152,7 @@ class ConfigStore:
             for col, defn in [
                 ("notify_original_author", "INTEGER NOT NULL DEFAULT -1"),
                 ("created_at", "INTEGER NOT NULL DEFAULT 0"),
+                ("reply_button_message_id", "INTEGER NOT NULL DEFAULT 0"),
             ]:
                 if col not in thread_cols:
                     conn.execute(f"ALTER TABLE thread_posts ADD COLUMN {col} {defn}")
@@ -253,6 +254,21 @@ class ConfigStore:
                 int(row["root_message_id"]),
                 int(row["original_author_id"]),
                 int(row["notify_original_author"]),
+            )
+
+    def get_reply_button_message_id(self, guild_id: int, root_message_id: int) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT reply_button_message_id FROM thread_posts WHERE guild_id=? AND message_id=?",
+                (guild_id, root_message_id),
+            ).fetchone()
+            return int(row["reply_button_message_id"]) if row else 0
+
+    def update_reply_button_message_id(self, guild_id: int, root_message_id: int, button_message_id: int) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE thread_posts SET reply_button_message_id=? WHERE guild_id=? AND message_id=?",
+                (button_message_id, guild_id, root_message_id),
             )
 
     def purge_old_thread_posts(self, max_age_seconds: int = THREAD_METADATA_TTL_SECONDS) -> int:
@@ -506,8 +522,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
 
         try:
             sent = await dest_channel.send(
-                content=f"# {defang_everyone_here(content)}",
-                view=self.bot.build_reply_view(),
+                content=defang_everyone_here(content),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
@@ -530,6 +545,14 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             original_author_id=interaction.user.id,
             notify_original_author=1 if ping_pref else 0,
         )
+        try:
+            button_msg = await dest_channel.send(
+                view=self.bot.build_reply_button_view(sent.id),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            self.bot.store.update_reply_button_message_id(interaction.guild.id, sent.id, button_msg.id)
+        except discord.HTTPException:
+            pass
         await self.bot.refresh_confess_launcher(interaction.guild.id, trigger_channel_id=dest_channel.id)
         await self.bot._safe_complete(interaction)
 
@@ -643,7 +666,6 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             reply_msg = await dest_channel.send(
                 content=defang_everyone_here(content),
                 reference=parent_msg,
-                view=self.bot.build_reply_view(),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except discord.HTTPException:
@@ -658,6 +680,21 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             original_author_id=interaction.user.id,
             notify_original_author=my_notify_pref,
         )
+
+        old_btn_id = self.bot.store.get_reply_button_message_id(interaction.guild.id, root_message_id)
+        if old_btn_id:
+            try:
+                await dest_channel.get_partial_message(old_btn_id).delete()
+            except discord.HTTPException:
+                pass
+        try:
+            button_msg = await dest_channel.send(
+                view=self.bot.build_reply_button_view(root_message_id),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            self.bot.store.update_reply_button_message_id(interaction.guild.id, root_message_id, button_msg.id)
+        except discord.HTTPException:
+            pass
 
         if parent_notify_pref == 1 and parent_author_id > 0 and parent_author_id != interaction.user.id:
             await self.bot.notify_original_poster(
@@ -788,9 +825,13 @@ class ConfessionsBot(commands.Bot):
 
     # ── View builders ─────────────────────────────────────────────────────────
     @staticmethod
-    def build_reply_view() -> discord.ui.View:
+    def build_reply_button_view(root_message_id: int) -> discord.ui.View:
         view = discord.ui.View(timeout=None)
-        view.add_item(discord.ui.Button(label="Reply", style=discord.ButtonStyle.secondary, custom_id="cr"))
+        view.add_item(discord.ui.Button(
+            label="Anonymously Reply",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"cr|{root_message_id}",
+        ))
         return view
 
     @staticmethod
@@ -903,6 +944,31 @@ class ConfessionsBot(commands.Bot):
                 await self._safe_ephemeral(interaction, "You can't submit anonymous replies on this server.")
                 return
 
+            if custom_id.startswith("cr|"):
+                # New-style button: custom_id encodes the root confession message ID
+                parts = custom_id.split("|")
+                if len(parts) != 2 or not parts[1].isdigit():
+                    await self._safe_ephemeral(interaction, "Invalid reply button.")
+                    return
+                root_message_id = int(parts[1])
+                if not self.store.get_thread_info(interaction.guild.id, root_message_id):
+                    await self._safe_ephemeral(interaction, "This confession can no longer be replied to.")
+                    return
+                button_msg = interaction.message
+                if button_msg is None:
+                    await self._safe_ephemeral(interaction, "That message no longer exists.")
+                    return
+                target_channel = button_msg.channel
+                if not isinstance(target_channel, discord.TextChannel):
+                    await self._safe_ephemeral(interaction, "That message no longer exists.")
+                    return
+                if not interaction.response.is_done():
+                    await interaction.response.send_modal(
+                        ReplyModal(self, cfg, parent_channel_id=target_channel.id, parent_message_id=root_message_id)
+                    )
+                return
+
+            # Legacy plain "cr" button: the clicked message is the reply target
             target_msg = interaction.message
             if target_msg is None:
                 await self._safe_ephemeral(interaction, "That message no longer exists.")
