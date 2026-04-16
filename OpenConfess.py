@@ -92,15 +92,15 @@ def anon_circle(user_id: int, root_message_id: int) -> str:
     return _ANON_CIRCLES[int.from_bytes(digest[:2], "big") % len(_ANON_CIRCLES)]
 
 
-def build_anon_reply(content: str, user_id: int, root_message_id: int, *, is_op: bool) -> str:
+def build_anon_reply(content: str, user_id: int, root_message_id: int, *, is_op: bool, circle: Optional[str] = None) -> str:
     """Return a plain-text message with a colored shape + anon ID on the first line, content on the second."""
     safe = defang_everyone_here(content)
     if is_op:
         prefix = f"{_OP_CIRCLE} [OP]"
     else:
-        circle = anon_circle(user_id, root_message_id)
+        resolved_circle = circle if circle is not None else anon_circle(user_id, root_message_id)
         tag    = anon_id(user_id, root_message_id)
-        prefix = f"{circle} [{tag}]"
+        prefix = f"{resolved_circle} [{tag}]"
     msg = f"{prefix}\n{safe}"
     if len(msg) > MAX_DISCORD_MESSAGE_LENGTH:
         msg = f"{prefix}\n{safe[:MAX_DISCORD_MESSAGE_LENGTH - len(prefix) - 1]}"
@@ -202,6 +202,15 @@ class ConfigStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_thread_posts_created_at ON thread_posts(created_at)"
             )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS thread_emoji_assignments (
+                    guild_id INTEGER NOT NULL,
+                    root_message_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    emoji_index INTEGER NOT NULL,
+                    PRIMARY KEY (guild_id, root_message_id, user_id)
+                )
+            """)
         self.purge_old_thread_posts()
 
     def get_config(self, guild_id: int) -> Optional[GuildConfig]:
@@ -327,6 +336,31 @@ class ConfigStore:
                 "UPDATE thread_posts SET reply_button_message_id=? WHERE guild_id=? AND message_id=?",
                 (button_message_id, guild_id, root_message_id),
             )
+
+    def get_or_assign_emoji_index(self, guild_id: int, root_message_id: int, user_id: int) -> int:
+        """Return a unique emoji index for this user in this thread, assigning one if needed."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT emoji_index FROM thread_emoji_assignments WHERE guild_id=? AND root_message_id=? AND user_id=?",
+                (guild_id, root_message_id, user_id),
+            ).fetchone()
+            if row:
+                return int(row["emoji_index"])
+            count_row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM thread_emoji_assignments WHERE guild_id=? AND root_message_id=?",
+                (guild_id, root_message_id),
+            ).fetchone()
+            idx = int(count_row["cnt"]) % len(_ANON_CIRCLES)
+            conn.execute(
+                "INSERT OR IGNORE INTO thread_emoji_assignments (guild_id, root_message_id, user_id, emoji_index) VALUES (?, ?, ?, ?)",
+                (guild_id, root_message_id, user_id, idx),
+            )
+            # Re-fetch in case of a race (INSERT OR IGNORE may have been a no-op)
+            row = conn.execute(
+                "SELECT emoji_index FROM thread_emoji_assignments WHERE guild_id=? AND root_message_id=? AND user_id=?",
+                (guild_id, root_message_id, user_id),
+            ).fetchone()
+            return int(row["emoji_index"])
 
     def purge_old_thread_posts(self, max_age_seconds: int = THREAD_METADATA_TTL_SECONDS) -> int:
         cutoff = now_ts() - max_age_seconds
@@ -777,8 +811,14 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
 
         # Build the colored anonymous reply
         is_op = parent_author_id > 0 and interaction.user.id == parent_author_id
+        circle = None
+        if not is_op:
+            emoji_idx = self.bot.store.get_or_assign_emoji_index(
+                interaction.guild.id, root_message_id, interaction.user.id
+            )
+            circle = _ANON_CIRCLES[emoji_idx]
         reply_content = build_anon_reply(
-            content, interaction.user.id, root_message_id, is_op=is_op
+            content, interaction.user.id, root_message_id, is_op=is_op, circle=circle
         )
 
         if self.thread_id:
