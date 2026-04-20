@@ -67,14 +67,26 @@ def jump_link(guild_id: int, channel_id: int, message_id: int) -> str:
     return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
 
 
-def anon_id(user_id: int, root_message_id: int) -> str:
-    """Stable 4-char hex ID for a user within one confession thread.
+_ANON_ADJECTIVES = [
+    "Anonymous", "Secret", "Mysterious", "Hidden", "Silent", "Sneaky", "Curious",
+    "Wandering", "Sleepy", "Bouncy", "Grumpy", "Jolly", "Fluffy", "Spooky",
+    "Zesty", "Cosmic", "Fuzzy", "Mighty", "Tiny", "Brave",
+]
+_ANON_ANIMALS = [
+    "Aardvark", "Albatross", "Axolotl", "Badger", "Capybara", "Chameleon",
+    "Dingo", "Echidna", "Flamingo", "Gecko", "Hedgehog", "Iguana", "Jaguar",
+    "Kinkajou", "Lemur", "Manatee", "Narwhal", "Ocelot", "Pangolin", "Quokka",
+    "Raccoon", "Salamander", "Tapir", "Uakari", "Vicuna", "Wombat", "Xerus",
+    "Yak", "Zorilla", "Platypus", "Capuchin", "Dugong", "Fennec", "Gibbon",
+]
 
-    Same user always gets the same tag in the same thread, but a
-    different tag in every other thread — no cross-thread correlation.
-    """
-    digest = hashlib.sha256(f"{user_id}:{root_message_id}".encode()).hexdigest()
-    return digest[:4].upper()
+
+def anon_id(user_id: int, root_message_id: int) -> str:
+    """Stable fun name for a user within one confession thread."""
+    digest = hashlib.sha256(f"{user_id}:{root_message_id}".encode()).digest()
+    adj    = _ANON_ADJECTIVES[int.from_bytes(digest[0:2], "big") % len(_ANON_ADJECTIVES)]
+    animal = _ANON_ANIMALS[int.from_bytes(digest[2:4], "big") % len(_ANON_ANIMALS)]
+    return f"{adj} {animal}"
 
 
 # Colored shape emojis — widely supported (Unicode 12.0+), render on all platforms
@@ -100,7 +112,7 @@ def build_anon_reply(content: str, user_id: int, root_message_id: int, *, is_op:
     else:
         resolved_circle = circle if circle is not None else anon_circle(user_id, root_message_id)
         tag    = anon_id(user_id, root_message_id)
-        prefix = f"{resolved_circle} [{tag}]"
+        prefix = f"{resolved_circle} {tag}"
     msg = f"{prefix}\n{safe}"
     if len(msg) > MAX_DISCORD_MESSAGE_LENGTH:
         msg = f"{prefix}\n{safe[:MAX_DISCORD_MESSAGE_LENGTH - len(prefix) - 1]}"
