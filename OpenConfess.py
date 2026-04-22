@@ -664,11 +664,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             )
             self.bot.store.update_discord_thread_id(interaction.guild.id, root_message_id, forum_thread.id)
             try:
-                button_msg = await forum_thread.send(
-                    view=self.bot.build_reply_button_view(root_message_id),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                self.bot.store.update_reply_button_message_id(interaction.guild.id, root_message_id, button_msg.id)
+                await forum_result.message.edit(view=self.bot.build_reply_button_view(root_message_id))
             except discord.HTTPException:
                 pass
             log.info("Confession posted (forum) guild=%r user=%r thread=%r len=%d", interaction.guild.id, interaction.user.id, forum_thread.id, len(content))
@@ -709,11 +705,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
             )
             self.bot.store.update_discord_thread_id(interaction.guild.id, sent.id, thread.id)
             try:
-                button_msg = await thread.send(
-                    view=self.bot.build_reply_button_view(sent.id),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                self.bot.store.update_reply_button_message_id(interaction.guild.id, sent.id, button_msg.id)
+                await sent.edit(view=self.bot.build_reply_button_view(sent.id))
             except discord.HTTPException:
                 pass
         except discord.HTTPException:
@@ -864,22 +856,6 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
                 notify_original_author=my_notify_pref,
             )
 
-            async with self.bot._get_reply_button_lock(interaction.guild.id, root_message_id):
-                old_btn_id = self.bot.store.get_reply_button_message_id(interaction.guild.id, root_message_id)
-                if old_btn_id:
-                    try:
-                        await reply_channel.get_partial_message(old_btn_id).delete()
-                    except discord.HTTPException:
-                        pass
-                try:
-                    button_msg = await reply_channel.send(
-                        view=self.bot.build_reply_button_view(root_message_id),
-                        allowed_mentions=discord.AllowedMentions.none(),
-                    )
-                    self.bot.store.update_reply_button_message_id(interaction.guild.id, root_message_id, button_msg.id)
-                except discord.HTTPException:
-                    pass
-
             if parent_author_id > 0 and parent_author_id != interaction.user.id:
                 await self.bot.notify_original_poster(
                     guild=interaction.guild,
@@ -940,22 +916,6 @@ class ReplyModal(discord.ui.Modal, title="Anonymous Reply"):
             notify_original_author=my_notify_pref,
         )
 
-        async with self.bot._get_reply_button_lock(interaction.guild.id, root_message_id):
-            old_btn_id = self.bot.store.get_reply_button_message_id(interaction.guild.id, root_message_id)
-            if old_btn_id:
-                try:
-                    await dest_channel.get_partial_message(old_btn_id).delete()
-                except discord.HTTPException:
-                    pass
-            try:
-                button_msg = await dest_channel.send(
-                    view=self.bot.build_reply_button_view(root_message_id),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                self.bot.store.update_reply_button_message_id(interaction.guild.id, root_message_id, button_msg.id)
-            except discord.HTTPException:
-                pass
-
         if parent_author_id > 0 and parent_author_id != interaction.user.id:
             await self.bot.notify_original_poster(
                 guild=interaction.guild,
@@ -990,7 +950,6 @@ class ConfessionsBot(commands.Bot):
         super().__init__(command_prefix=[], intents=intents)
         self.store = store
         self._launcher_locks: dict[int, asyncio.Lock] = {}
-        self._reply_button_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
     async def setup_hook(self) -> None:
         await self.add_cog(ConfessionsCog(self))
@@ -1012,12 +971,6 @@ class ConfessionsBot(commands.Bot):
         if guild_id not in self._launcher_locks:
             self._launcher_locks[guild_id] = asyncio.Lock()
         return self._launcher_locks[guild_id]
-
-    def _get_reply_button_lock(self, guild_id: int, root_message_id: int) -> asyncio.Lock:
-        key = (guild_id, root_message_id)
-        if key not in self._reply_button_locks:
-            self._reply_button_locks[key] = asyncio.Lock()
-        return self._reply_button_locks[key]
 
     @staticmethod
     def _message_has_confess_launcher(message: discord.Message, guild_id: int) -> bool:
