@@ -63,6 +63,13 @@ def defang_everyone_here(text: str) -> str:
     )
 
 
+def thread_name_from_content(content: str, max_len: int = 100) -> str:
+    name = " ".join(content.split())
+    if len(name) > max_len:
+        name = name[:max_len - 1].rstrip() + "…"
+    return name or "Anonymous Confession"
+
+
 def jump_link(guild_id: int, channel_id: int, message_id: int) -> str:
     return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
 
@@ -634,7 +641,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
                 tag_kwargs["applied_tags"] = [dest_channel.available_tags[0]]
             try:
                 forum_result = await dest_channel.create_thread(
-                    name="Anonymous Confession",
+                    name=thread_name_from_content(content),
                     content=defang_everyone_here(content),
                     allowed_mentions=discord.AllowedMentions.none(),
                     auto_archive_duration=10080,
@@ -700,7 +707,7 @@ class ConfessModal(discord.ui.Modal, title="Anonymous Confession"):
         )
         try:
             thread = await sent.create_thread(
-                name="Anonymous Confession",
+                name=thread_name_from_content(content),
                 auto_archive_duration=10080,
             )
             self.bot.store.update_discord_thread_id(interaction.guild.id, sent.id, thread.id)
